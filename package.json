@@ -14,7 +14,8 @@
     "db:migrate": "node --env-file=.env --import tsx scripts/db-migrate.ts",
     "env:check": "node --import tsx scripts/env-sync-production.ts --check",
     "env:sync:preview": "node --import tsx scripts/env-sync-production.ts --target preview",
-    "env:sync:production": "node --import tsx scripts/env-sync-production.ts"
+    "env:sync:production": "node --import tsx scripts/env-sync-production.ts",
+    "dev:reset-email-limit": "node --env-file=.env --import tsx scripts/dev-reset-email-limit.ts"
   },
   "dependencies": {
     "@neon/config": "^1.14.4",
