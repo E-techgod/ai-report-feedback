@@ -243,15 +243,6 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       alignSelf: 'flex-start',
       textDecoration: 'none',
     },
-    transparency: {
-      marginTop: 14,
-      borderWidth: 1,
-      borderColor: C.line,
-      borderRadius: 6,
-      padding: 10,
-      fontSize: 9,
-      color: C.muted,
-    },
     legal: { marginTop: 10, fontSize: 8, color: C.muted },
   });
 
@@ -419,12 +410,6 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
             )}
           </View>
 
-          <View style={styles.transparency} wrap={false}>
-            <Text style={styles.h3}>{c.transparency.title}</Text>
-            {c.transparency.paragraphs.map((p) => (
-              <Text key={p}>{p}</Text>
-            ))}
-          </View>
           <Text style={styles.legal}>{c.legal}</Text>
         </Page>
       </Document>

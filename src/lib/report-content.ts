@@ -63,7 +63,6 @@ export type ReportContent = {
     url: string | null;
     unavailableNote: string;
   };
-  transparency: { title: string; aiUsed: boolean; paragraphs: string[]; mixLegend: string[] };
   legal: string;
 };
 
@@ -103,7 +102,6 @@ function areas(list: FinalReport['model']['personalAreas']): AreaContent[] {
 
 export function buildReportContent(report: FinalReport): ReportContent {
   const { model, narrative } = report;
-  const aiUsed = report.narrativeSource === 'ai';
   const date = formatReportDate(report.generatedAt);
   const year = reportYear(report.generatedAt);
   const count = model.priorities.length;
@@ -196,20 +194,6 @@ export function buildReportContent(report: FinalReport): ReportContent {
       unavailableNote:
         'El calendario de citas no está disponible por el momento. Escríbenos y con gusto te ayudamos a agendar.',
     },
-    transparency: {
-      title: 'Cómo se elaboró este reporte',
-      aiUsed,
-      paragraphs: aiUsed
-        ? [
-            'El 85% de este reporte se genera con reglas y plantillas validadas por Quirón. Solo el 15% —el resumen ejecutivo y una breve explicación de cada prioridad— es redactado con ayuda de inteligencia artificial, que no calcula puntajes ni decide acciones.',
-          ]
-        : [
-            'Este reporte se generó por completo con reglas y plantillas validadas por Quirón. La redacción asistida por inteligencia artificial no estuvo disponible en esta ocasión.',
-          ],
-      mixLegend: aiUsed
-        ? ['65% reglas y plantillas validadas', '20% interfaz fija', '15% redacción con IA']
-        : [],
-    },
     legal:
       'Este reporte es una herramienta informativa preliminar basada en respuestas autodeclaradas; no constituye ni sustituye asesoría legal, fiscal, financiera ni de seguros personalizada, ni certificación de cobertura. Algunas preguntas pueden no aplicar a todas las personas. Para un diagnóstico integral, consulta con especialistas.',
   };
@@ -257,8 +241,6 @@ export function flattenContent(c: ReportContent): string[] {
     c.cta.text,
     c.cta.buttonLabel,
     ...(c.cta.url ? [] : [c.cta.unavailableNote]),
-    c.transparency.title,
-    ...c.transparency.paragraphs,
     c.legal,
   ];
 }

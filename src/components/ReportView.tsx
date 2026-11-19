@@ -499,30 +499,6 @@ export default function ReportView({
                 <SourceLine kind="static" tag="CTA FIJO" />
               </div>
 
-              {/* How this report was produced (reflects what actually happened for this report) */}
-              <div className={s.transparency}>
-                <h3>{c.transparency.title}</h3>
-                {c.transparency.aiUsed && (
-                  <>
-                    <MixBar />
-                    <div className={s.legendInline}>
-                      <span>
-                        <i className={cx(s.dot, s.dotDet)} /> {c.transparency.mixLegend[0]}
-                      </span>
-                      <span>
-                        <i className={cx(s.dot, s.dotStatic)} /> {c.transparency.mixLegend[1]}
-                      </span>
-                      <span>
-                        <i className={cx(s.dot, s.dotAi)} /> {c.transparency.mixLegend[2]}
-                      </span>
-                    </div>
-                  </>
-                )}
-                {c.transparency.paragraphs.map((paragraph) => (
-                  <p key={paragraph}>{paragraph}</p>
-                ))}
-              </div>
-
               <p className={s.legal}>{c.legal}</p>
               <SourceLine
                 kind="static"
