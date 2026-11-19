@@ -11,15 +11,15 @@ import { buildReportContent, type AreaContent, type ReportContent } from '../rep
  * content object the web view and the email use — never from browser state.
  */
 const C = {
-  ink: '#162a20',
-  muted: '#63756a',
-  line: '#e1e8df',
-  forest: '#143b2c',
-  gold: '#be925a',
-  soft: '#f4f3ee',
-  amber: '#9a6626',
-  amberBg: '#fbf0df',
-  greenBg: '#e6f2ea',
+  ink: '#ffffff',
+  muted: '#a1a4ad',
+  line: '#34363c',
+  forest: '#1a1a1c',
+  gold: '#d95d1e',
+  soft: '#1d1e22',
+  amber: '#d95d1e',
+  amberBg: '#d95d1e',
+  greenBg: '#d95d1e',
 };
 
 function loadLogo(): Buffer | null {
@@ -39,6 +39,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
   Font.registerHyphenationCallback((word) => [word]);
   const styles = StyleSheet.create({
     page: {
+      backgroundColor: '#000000',
       paddingTop: 100,
       paddingBottom: 56,
       paddingHorizontal: 42,
@@ -89,7 +90,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
     h1: {
       fontSize: 24,
       fontFamily: 'Helvetica-Bold',
-      color: C.forest,
+      color: C.ink,
       lineHeight: 1.15,
       marginBottom: 8,
     },
@@ -103,7 +104,15 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       marginBottom: 14,
     },
     scores: { flexDirection: 'row', gap: 12, marginBottom: 6 },
-    scoreCard: { flex: 1, borderWidth: 1, borderColor: C.line, borderRadius: 6, padding: 12 },
+    hero: { backgroundColor: C.forest, borderRadius: 8, padding: 16, marginBottom: 6 },
+    scoreCard: {
+      flex: 1,
+      backgroundColor: C.soft,
+      borderWidth: 1,
+      borderColor: C.line,
+      borderRadius: 6,
+      padding: 12,
+    },
     scoreLabel: {
       fontSize: 8,
       letterSpacing: 1,
@@ -116,13 +125,13 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       lineHeight: 1.05,
       marginBottom: 6,
       fontFamily: 'Helvetica-Bold',
-      color: C.forest,
+      color: C.gold,
     },
     scoreOf: { fontSize: 13, color: C.muted },
     level: {
       fontSize: 9,
       fontFamily: 'Helvetica-Bold',
-      color: C.amber,
+      color: '#000000',
       backgroundColor: C.amberBg,
       paddingVertical: 3,
       paddingHorizontal: 7,
@@ -130,7 +139,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       alignSelf: 'flex-start',
       marginTop: 6,
     },
-    levelGreen: { color: C.forest, backgroundColor: C.greenBg },
+    levelGreen: { color: '#000000', backgroundColor: C.greenBg },
     barTrack: { height: 6, backgroundColor: C.line, borderRadius: 3, marginTop: 8 },
     barFill: { height: 6, backgroundColor: C.gold, borderRadius: 3 },
     scoreSub: { fontSize: 9, color: C.muted, marginTop: 4 },
@@ -147,13 +156,13 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       marginBottom: 2,
       fontSize: 15,
       fontFamily: 'Helvetica-Bold',
-      color: C.forest,
+      color: C.ink,
     },
     secSub: { fontSize: 9.5, color: C.muted },
     panel: { backgroundColor: C.soft, borderRadius: 6, padding: 12, marginBottom: 8 },
-    h3: { fontSize: 11, fontFamily: 'Helvetica-Bold', color: C.forest, marginBottom: 4 },
+    h3: { fontSize: 11, fontFamily: 'Helvetica-Bold', color: C.ink, marginBottom: 4 },
     signals: { flexDirection: 'row', gap: 8, marginTop: 4 },
-    signal: { flex: 1, backgroundColor: '#fff', borderRadius: 4, padding: 8 },
+    signal: { flex: 1, backgroundColor: C.forest, borderRadius: 4, padding: 8 },
     signalLabel: { fontSize: 7.5, letterSpacing: 0.8, color: C.muted, textTransform: 'uppercase' },
     signalValue: { fontSize: 10.5, fontFamily: 'Helvetica-Bold', marginTop: 2 },
     small: { fontSize: 8, color: C.muted },
@@ -165,7 +174,14 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       fontSize: 10.5,
     },
     areas: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-    area: { width: '48.8%', borderWidth: 1, borderColor: C.line, borderRadius: 6, padding: 10 },
+    area: {
+      width: '48.8%',
+      backgroundColor: C.soft,
+      borderWidth: 1,
+      borderColor: C.line,
+      borderRadius: 6,
+      padding: 10,
+    },
     areaTop: {
       flexDirection: 'row',
       justifyContent: 'space-between',
@@ -175,14 +191,15 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
     },
     chip: {
       fontSize: 7.5,
-      color: C.amber,
+      color: '#000000',
       backgroundColor: C.amberBg,
       paddingVertical: 2,
       paddingHorizontal: 6,
       borderRadius: 7,
     },
-    chipGreen: { color: C.forest, backgroundColor: C.greenBg },
+    chipGreen: { color: '#000000', backgroundColor: C.greenBg },
     priority: {
+      backgroundColor: C.soft,
       flexDirection: 'row',
       gap: 10,
       borderWidth: 1,
@@ -195,8 +212,8 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       width: 22,
       height: 22,
       borderRadius: 11,
-      backgroundColor: C.forest,
-      color: '#fff',
+      backgroundColor: C.gold,
+      color: '#000000',
       textAlign: 'center',
       paddingTop: 5,
       fontSize: 10,
@@ -214,10 +231,10 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
     },
     cta: { backgroundColor: C.forest, color: '#fff', borderRadius: 8, padding: 16, marginTop: 14 },
     ctaTitle: { fontSize: 13, fontFamily: 'Helvetica-Bold', color: '#fff', marginBottom: 4 },
-    ctaText: { fontSize: 9.5, color: '#dfe9e2', marginBottom: 8 },
+    ctaText: { fontSize: 9.5, color: C.muted, marginBottom: 8 },
     ctaButton: {
       backgroundColor: C.gold,
-      color: '#fff',
+      color: '#000000',
       fontFamily: 'Helvetica-Bold',
       fontSize: 10,
       paddingVertical: 6,
@@ -293,7 +310,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
             <Text render={({ pageNumber, totalPages }) => `${pageNumber} / ${totalPages}`} />
           </View>
 
-          <View>
+          <View style={styles.hero}>
             <Text style={styles.eyebrow}>{c.hero.eyebrow}</Text>
             <Text style={styles.h1}>{c.hero.title}</Text>
             <Text style={styles.lead}>{c.hero.lead}</Text>
