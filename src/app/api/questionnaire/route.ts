@@ -1,4 +1,5 @@
 import { after, NextResponse } from 'next/server';
+import { randomUUID } from 'node:crypto';
 import { submissionSchema } from '@/lib/validation';
 import { saveSubmissionWithRow } from '@/lib/sheets';
 import { createGoogleSheetsGateway } from '@/lib/google-sheets-client';
@@ -79,9 +80,24 @@ export async function POST(req: Request) {
       duplicate = true;
       sheetRowNumber = prior.sheetRowNumber ?? undefined;
     } else {
-      const saved = await saveSubmissionWithRow(gateway, submission);
-      duplicate = saved.status === 'duplicate';
-      sheetRowNumber = saved.rowNumber;
+      const fingerprint = submissionFingerprint(
+        normalizeEmail(submission.email),
+        submission.answers,
+      );
+      const token = randomUUID();
+      if (!(await deps.store.acquireSheetAppend(fingerprint, token, new Date())))
+        return json({ ok: false, retry: true, error: 'Estamos guardando tu diagnóstico.' }, 409);
+      try {
+        const saved = await saveSubmissionWithRow(gateway, submission);
+        duplicate = saved.status === 'duplicate';
+        sheetRowNumber = saved.rowNumber;
+      } finally {
+        try {
+          await deps.store.releaseSheetAppend(fingerprint, token);
+        } catch {
+          console.error('[questionnaire] Sheet append lease release failed');
+        }
+      }
     }
   } catch (error) {
     // Log only a short message: Google client errors can embed request details.

@@ -62,3 +62,10 @@ create table if not exists rate_limits (
   window_start timestamptz not null,
   count        int not null
 );
+
+-- Prevent two serverless requests from appending the same response row concurrently.
+create table if not exists sheet_append_leases (
+  fingerprint text primary key,
+  token uuid not null,
+  expires_at timestamptz not null
+);

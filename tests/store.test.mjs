@@ -104,6 +104,23 @@ test('cutover re-queue changes only reviewed disabled reports once', async () =>
   );
 });
 
+test('a cross-instance Sheet append lease has one winner and can be safely released', async () => {
+  const store = await freshStore();
+  const a = crypto.randomUUID();
+  const b = crypto.randomUUID();
+  const results = await Promise.all([
+    store.acquireSheetAppend('fp', a, t0),
+    store.acquireSheetAppend('fp', b, t0),
+  ]);
+  assert.equal(results.filter(Boolean).length, 1);
+  const winner = results[0] ? a : b;
+  const loser = results[0] ? b : a;
+  await store.releaseSheetAppend('fp', loser);
+  assert.equal(await store.acquireSheetAppend('fp', loser, plus(1000)), false);
+  await store.releaseSheetAppend('fp', winner);
+  assert.equal(await store.acquireSheetAppend('fp', loser, plus(1000)), true);
+});
+
 test('claimEmail lets exactly one concurrent caller win', async () => {
   const store = await freshStore();
   const { id } = await seed(store);

@@ -34,6 +34,10 @@ and any existing `ID Reporte` before writing tracking cells. It never rewrites a
 source of truth; web report, PDF download, and email attachment all read the same hashed, stored
 `FinalReport`. The Sheet is a projection of status, not a second report store.
 
+Before append, a 90-second Neon lease keyed by the answer fingerprint lets only one serverless
+request write the row. A concurrent request gets a retry response; after the lease is released it
+finds the original row. This closes the cross-instance gap left by a process-local dedupe map.
+
 Tracking updates use a per-report database lease and a version. Failed projections remain unsynced
 and the daily cron retries up to 25 rows within a 12-second budget. Each Sheet counter is assigned
 from persisted state, never incremented. `Fecha Envío` means Resend accepted the message, while

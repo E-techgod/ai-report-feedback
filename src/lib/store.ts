@@ -247,6 +247,30 @@ export function createStore(sql: SqlExecutor) {
       return rows.length > 0;
     },
 
+    async acquireSheetAppend(
+      fingerprint: string,
+      token: string,
+      now: Date,
+      leaseMs = 90_000,
+    ): Promise<boolean> {
+      const rows = await sql(
+        `insert into sheet_append_leases (fingerprint, token, expires_at)
+         values ($1, $2, $3)
+         on conflict (fingerprint) do update set token = $2, expires_at = $3
+           where sheet_append_leases.expires_at < $4
+         returning token`,
+        [fingerprint, token, new Date(now.getTime() + leaseMs).toISOString(), now.toISOString()],
+      );
+      return rows.length === 1;
+    },
+
+    async releaseSheetAppend(fingerprint: string, token: string): Promise<void> {
+      await sql('delete from sheet_append_leases where fingerprint = $1 and token = $2', [
+        fingerprint,
+        token,
+      ]);
+    },
+
     /** Same person + same answers recently, even under a different client-side submission id. */
     findRecentByFingerprint: (fingerprint: string, since: Date) =>
       one(
