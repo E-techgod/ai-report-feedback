@@ -949,3 +949,20 @@
     -webkit-print-color-adjust: exact;
   }
 }
+
+/* ---------- email delivery status (shown beside the PDF button) ---------- */
+.emailStatus {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--static-bg);
+  color: var(--muted);
+}
+.emailOk {
+  background: #e6f2ea;
+  color: var(--forest);
+}
+.emailError {
+  background: var(--amber-bg);
+  color: var(--amber);
+}

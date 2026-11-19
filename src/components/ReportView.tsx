@@ -1,52 +1,33 @@
 'use client';
 import Image from 'next/image';
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { getBookingUrl } from '@/lib/booking';
-import {
-  MAX_CONTEXT_WORDS,
-  MAX_SUMMARY_WORDS,
-  type Area,
-  type Narrative,
-  type ReportModel,
-} from '@/lib/report';
+import { createContext, useContext, useEffect, useState } from 'react';
+import type { FinalReport } from '@/lib/final-report';
+import type { PublicEmailState } from '@/lib/pipeline';
+import { SECTION_NAV, buildReportContent, type AreaContent } from '@/lib/report-content';
+import { MAX_CONTEXT_WORDS, MAX_SUMMARY_WORDS } from '@/lib/report';
 import s from './ReportView.module.css';
 
 /**
  * The personalized diagnosis ("Tu diagnóstico patrimonial personalizado"), built from
  * report-template/quiron-report-prototype-v2.html.
  *
- * Who writes what (the 65% / 20% / 15% split):
- *  - Rules engine (src/lib/report.ts): score, level, areas, statuses, ranked priorities, findings,
- *    actions, plan.                                                              ~65%
- *  - Fixed interface: headings, labels, descriptions, CTA, disclaimer.            ~20%
- *  - AI (4 text slots only): executive summary + one short context per priority.  ~15%
- *
- * Edit layout/wording here and styles in ReportView.module.css. The PDF is the browser's print
- * of this same page (A4 rules in the CSS module's @media print).
+ * It renders ONE finalized report object (FinalReport). All customer-visible text comes from
+ * buildReportContent(), the same source the PDF and the email use, so they cannot diverge.
+ * Edit wording in src/lib/report-content.ts and layout/styles here and in ReportView.module.css.
  *
  * `mode="team"` adds the prototype's review annotations (source tags, AI/rules mix panel).
  * Customers always get `mode="client"` (the default).
  */
-export type Report = { model: ReportModel; narrative: Narrative; aiUsed: boolean };
+export type EmailStatusView = { state: PublicEmailState; to: string };
 
 type ReportViewProps = {
-  report: Report;
-  firstName: string;
-  /** ISO date-time the report was generated. */
-  generatedAt: string;
+  report: FinalReport;
   mode?: 'client' | 'team';
-  /** True while the AI text is still loading (the PDF button waits so the PDF matches the page). */
-  aiPending?: boolean;
+  /** Server PDF endpoint + access token. Without it (dev preview) the browser print dialog is used. */
+  pdf?: { url: string; token: string } | null;
+  /** Real delivery state of the report email; null/undefined hides the line. */
+  email?: EmailStatusView | null;
 };
-
-const SECTIONS = [
-  { id: 'resumen', label: 'Resumen' },
-  { id: 'ejecutivo', label: 'Diagnóstico' },
-  { id: 'personal', label: 'Personal' },
-  { id: 'empresarial', label: 'Empresarial' },
-  { id: 'prioridades', label: 'Prioridades' },
-  { id: 'plan', label: 'Plan de acción' },
-];
 
 const cx = (...names: Array<string | false | undefined>) => names.filter(Boolean).join(' ');
 
@@ -56,15 +37,6 @@ function slug(text: string) {
     .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
-}
-
-function formatDate(iso: string) {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  return new Intl.DateTimeFormat('es-MX', {
-    dateStyle: 'long',
-    timeZone: 'America/Mexico_City',
-  }).format(date);
 }
 
 function MixBar() {
@@ -107,17 +79,7 @@ function SourceLine({
   );
 }
 
-function AiBox({
-  title,
-  limit,
-  text,
-  children,
-}: {
-  title: string;
-  limit: string;
-  text: string;
-  children?: ReactNode;
-}) {
+function AiBox({ title, limit, text }: { title: string; limit: string; text: string }) {
   const { team, aiUsed } = useContext(ViewContext);
   return (
     <div className={cx(s.aiBox, team && s.aiBoxTeam)}>
@@ -135,24 +97,19 @@ function AiBox({
           redacta; no calcula ni decide.
         </p>
       )}
-      {children}
     </div>
   );
 }
 
-function AreaCard({ area }: { area: Area }) {
+function AreaCard({ area }: { area: AreaContent }) {
   return (
     <article className={s.area}>
       <div className={s.areaTop}>
         <h3>{area.title}</h3>
-        <span className={cx(s.chip, area.status === 'solid' && s.chipGreen)}>
-          {area.status === 'solid' ? 'Sólido' : 'Por revisar'}
-        </span>
+        <span className={cx(s.chip, area.solid && s.chipGreen)}>{area.statusLabel}</span>
       </div>
       <p>{area.description}</p>
-      <span className={s.areaCount}>
-        {area.yes} de {area.total} respuestas afirmativas
-      </span>
+      <span className={s.areaCount}>{area.countLabel}</span>
       <SourceLine kind="det" tag="REGLAS" note="Indicador, estado y texto aprobado." />
     </article>
   );
@@ -170,19 +127,40 @@ function SectionHeader({ num, title, sub }: { num: string; title: string; sub: s
   );
 }
 
+/** What the customer is told about the email, from the REAL delivery state. */
+function emailMessage(email: EmailStatusView): { text: string; tone: 'ok' | 'wait' | 'error' } {
+  switch (email.state) {
+    case 'sending':
+      return { text: `Enviando tu informe a ${email.to}…`, tone: 'wait' };
+    case 'sent':
+    case 'delivered':
+      return { text: `Informe enviado a ${email.to}`, tone: 'ok' };
+    case 'bounced':
+      return {
+        text: `No se pudo entregar el correo a ${email.to}. Descarga tu informe en PDF aquí.`,
+        tone: 'error',
+      };
+    default:
+      return {
+        text: 'No se pudo enviar el correo. Descarga tu informe en PDF aquí.',
+        tone: 'error',
+      };
+  }
+}
+
 export default function ReportView({
   report,
-  firstName,
-  generatedAt,
   mode = 'client',
-  aiPending = false,
+  pdf = null,
+  email = null,
 }: ReportViewProps) {
   const team = mode === 'team';
-  const { model, narrative, aiUsed } = report;
-  const { score } = model;
-  // NEXT_PUBLIC_* values are inlined at build time: changing it in Vercel requires a redeploy.
-  const bookingUrl = getBookingUrl(process.env.NEXT_PUBLIC_BOOKING_URL);
+  const c = buildReportContent(report);
+  const aiUsed = report.narrativeSource === 'ai';
+  const { model } = report;
   const [activeId, setActiveId] = useState('resumen');
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfError, setPdfError] = useState(false);
 
   // Highlight the current section in the left navigation.
   useEffect(() => {
@@ -197,25 +175,56 @@ export default function ReportView({
     return () => observer.disconnect();
   }, []);
 
-  function downloadPdf() {
-    // The browser print dialog ("Guardar como PDF") uses the page title as the file name.
-    const previous = document.title;
-    document.title = `Diagnostico-Patrimonial-Quiron${firstName ? `-${slug(firstName)}` : ''}`;
-    const restore = () => {
-      document.title = previous;
-      window.removeEventListener('afterprint', restore);
-    };
-    window.addEventListener('afterprint', restore);
-    window.print();
+  async function downloadPdf() {
+    if (!pdf) {
+      // Development preview only: no stored report exists, so print the page instead.
+      window.print();
+      return;
+    }
+    setPdfBusy(true);
+    setPdfError(false);
+    try {
+      // The PDF is rendered on the server from the stored finalized report.
+      const response = await fetch(pdf.url, { headers: { 'x-report-token': pdf.token } });
+      if (!response.ok) throw new Error('pdf');
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Diagnostico-Patrimonial-Quiron${report.firstName ? `-${slug(report.firstName)}` : ''}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setPdfError(true);
+    } finally {
+      setPdfBusy(false);
+    }
   }
+
+  const emailInfo = email && email.state !== 'off' ? emailMessage(email) : null;
 
   return (
     <ViewContext.Provider value={{ team, aiUsed }}>
       <div className={s.root}>
         <div className={s.actionbar}>
-          {aiPending && <span className={s.actionNote}>Personalizando la redacción…</span>}
-          <button type="button" className={s.pdfButton} onClick={downloadPdf} disabled={aiPending}>
-            Descargar PDF ↓
+          {emailInfo && (
+            <span
+              className={cx(
+                s.emailStatus,
+                emailInfo.tone === 'ok' && s.emailOk,
+                emailInfo.tone === 'error' && s.emailError,
+              )}
+              role="status"
+            >
+              {emailInfo.text}
+            </span>
+          )}
+          {pdfError && (
+            <span className={cx(s.emailStatus, s.emailError)} role="alert">
+              No se pudo descargar el PDF. Intenta nuevamente.
+            </span>
+          )}
+          <button type="button" className={s.pdfButton} onClick={downloadPdf} disabled={pdfBusy}>
+            {pdfBusy ? 'Preparando PDF…' : 'Descargar PDF ↓'}
           </button>
         </div>
 
@@ -242,7 +251,7 @@ export default function ReportView({
           <aside className={s.aside}>
             <div className={s.sideHeading}>Contenido del reporte</div>
             <nav className={s.nav} aria-label="Secciones del reporte">
-              {SECTIONS.map((section, i) => (
+              {SECTION_NAV.map((section, i) => (
                 <a
                   key={section.id}
                   href={`#${section.id}`}
@@ -270,7 +279,7 @@ export default function ReportView({
           </aside>
 
           <main className={s.paper} id="report">
-            {/* Brand header: only visible in the PDF/print (the site header is hidden there) */}
+            {/* Brand header: only visible in the print fallback (the site header is hidden there) */}
             <div className={s.printBrand}>
               <span className={s.printLogo}>
                 <Image
@@ -280,42 +289,40 @@ export default function ReportView({
                   height={66}
                 />
               </span>
-              <span className={s.printBrandText}>Diagnóstico de Blindaje Patrimonial</span>
+              <span className={s.printBrandText}>{c.brand}</span>
             </div>
 
             {/* 00 · Resumen */}
             <section className={s.hero} id="resumen" data-report-section>
-              <div className={s.eyebrow}>Tu evaluación · Diagnóstico inicial</div>
-              <h1>Tu diagnóstico patrimonial personalizado.</h1>
-              <p className={s.lead}>
-                Una mirada integral a la protección de tu patrimonio, tu familia y la continuidad de
-                lo que has construido.
-              </p>
+              <div className={s.eyebrow}>{c.hero.eyebrow}</div>
+              <h1>{c.hero.title}</h1>
+              <p className={s.lead}>{c.hero.lead}</p>
               <SourceLine
                 kind="static"
                 tag="INTERFAZ FIJA"
                 note="Encabezado, contenido de marca y estructura del reporte."
               />
               <div className={s.meta}>
-                {firstName && <span>Preparado para {firstName}</span>}
-                {formatDate(generatedAt) && <span>{formatDate(generatedAt)}</span>}
-                <span>
-                  QUIRÓN · {new Date(generatedAt).getFullYear() || new Date().getFullYear()}
-                </span>
+                {c.hero.meta.map((item) => (
+                  <span key={item}>{item}</span>
+                ))}
               </div>
               <div className={s.scores}>
                 <article className={s.scoreCard}>
-                  <div className={s.scoreLabel}>Blindaje patrimonial general</div>
-                  <div className={s.scoreNumber}>{score.protection}%</div>
-                  <span className={cx(s.level, model.levelTone === 'high' && s.levelGreen)}>
-                    Nivel de blindaje: {model.level}
+                  <div className={s.scoreLabel}>{c.hero.score.label}</div>
+                  <div className={s.scoreNumber}>{c.hero.score.value}</div>
+                  <span className={cx(s.level, c.hero.score.levelTone === 'high' && s.levelGreen)}>
+                    {c.hero.score.levelLabel}
                   </span>
                   <div
                     className={s.progress}
                     role="img"
-                    aria-label={`${score.protection} por ciento`}
+                    aria-label={`${model.score.protection} por ciento`}
                   >
-                    <div className={s.progressFill} style={{ width: `${score.protection}%` }} />
+                    <div
+                      className={s.progressFill}
+                      style={{ width: `${model.score.protection}%` }}
+                    />
                   </div>
                   <SourceLine
                     kind="det"
@@ -324,11 +331,11 @@ export default function ReportView({
                   />
                 </article>
                 <article className={s.scoreCard}>
-                  <div className={s.scoreLabel}>Áreas por fortalecer</div>
+                  <div className={s.scoreLabel}>{c.hero.weak.label}</div>
                   <div className={s.scoreNumber}>
-                    {model.weakCount} <span className={s.scoreOf}>/ 20</span>
+                    {c.hero.weak.value} <span className={s.scoreOf}>{c.hero.weak.of}</span>
                   </div>
-                  <div className={s.scoreSub}>Indicadores detectados según las respuestas</div>
+                  <div className={s.scoreSub}>{c.hero.weak.sub}</div>
                   <SourceLine
                     kind="det"
                     tag="REGLAS · CONTEO"
@@ -341,30 +348,20 @@ export default function ReportView({
             {/* 01 · Diagnóstico ejecutivo (AI slot 1) */}
             <section className={s.section} id="ejecutivo" data-report-section>
               <SectionHeader
-                num="01"
-                title={'Diagnóstico ejecutivo'}
-                sub="Una lectura clara de tus principales indicadores patrimoniales."
+                num={c.executive.num}
+                title={c.executive.title}
+                sub={c.executive.sub}
               />
               <div className={s.contentPanel}>
-                <h3>Lo que detectamos en tu evaluación</h3>
+                <h3>{c.executive.panelTitle}</h3>
                 <div className={s.signalList}>
-                  <div className={s.signal}>
-                    <div className={s.signalLabel}>Nivel general</div>
-                    <strong>{model.level}</strong>
-                    <small>Clasificación del motor</small>
-                  </div>
-                  <div className={s.signal}>
-                    <div className={s.signalLabel}>Indicadores</div>
-                    <strong>
-                      {model.weakCount} {model.weakCount === 1 ? 'área' : 'áreas'} por fortalecer
-                    </strong>
-                    <small>Conteo del motor</small>
-                  </div>
-                  <div className={s.signal}>
-                    <div className={s.signalLabel}>Foco principal</div>
-                    <strong>{model.focus}</strong>
-                    <small>Prioridad según tus respuestas</small>
-                  </div>
+                  {c.executive.signals.map((signal) => (
+                    <div className={s.signal} key={signal.label}>
+                      <div className={s.signalLabel}>{signal.label}</div>
+                      <strong>{signal.value}</strong>
+                      <small>{signal.small}</small>
+                    </div>
+                  ))}
                 </div>
                 <SourceLine
                   kind="det"
@@ -375,21 +372,15 @@ export default function ReportView({
               <AiBox
                 title="Interpretación ejecutiva"
                 limit={`Hasta ${MAX_SUMMARY_WORDS} palabras`}
-                text={narrative.executiveSummary}
-              >
-                {aiPending && <span className={s.pending}>Personalizando la redacción…</span>}
-              </AiBox>
+                text={c.executive.summaryText}
+              />
             </section>
 
             {/* 02 · Patrimonio personal */}
             <section className={s.section} id="personal" data-report-section>
-              <SectionHeader
-                num="02"
-                title={'Patrimonio personal'}
-                sub="Planeación sucesoria, documentación, protección familiar y seguros."
-              />
+              <SectionHeader num={c.personal.num} title={c.personal.title} sub={c.personal.sub} />
               <div className={s.areas}>
-                {model.personalAreas.map((area) => (
+                {c.personal.areas.map((area) => (
                   <AreaCard key={area.id} area={area} />
                 ))}
               </div>
@@ -402,13 +393,9 @@ export default function ReportView({
 
             {/* 03 · Patrimonio empresarial */}
             <section className={s.section} id="empresarial" data-report-section>
-              <SectionHeader
-                num="03"
-                title={'Patrimonio empresarial'}
-                sub="Protección de la empresa, sucesión y continuidad de operaciones."
-              />
+              <SectionHeader num={c.business.num} title={c.business.title} sub={c.business.sub} />
               <div className={s.areas}>
-                {model.businessAreas.map((area) => (
+                {c.business.areas.map((area) => (
                   <AreaCard key={area.id} area={area} />
                 ))}
               </div>
@@ -422,44 +409,37 @@ export default function ReportView({
             {/* 04 · Prioridades (AI slots 2–4) */}
             <section className={s.section} id="prioridades" data-report-section>
               <SectionHeader
-                num="04"
-                title={
-                  model.priorities.length === 1
-                    ? 'Tu prioridad estratégica'
-                    : 'Prioridades estratégicas'
-                }
-                sub="Puntos de atención seleccionados y ordenados con reglas predefinidas."
+                num={c.priorities.num}
+                title={c.priorities.title}
+                sub={c.priorities.sub}
               />
               <SourceLine
                 kind="det"
                 tag="REGLAS · RANKING"
                 note="Claude no selecciona ni reordena ninguna prioridad."
               />
-              {model.priorities.length === 0 ? (
+              {c.priorities.empty ? (
                 <div className={s.allGood}>
-                  <h3>No detectamos áreas por fortalecer en tus respuestas.</h3>
-                  <p style={{ marginBottom: 0 }}>
-                    Conviene revisar periódicamente tus documentos y coberturas para confirmar que
-                    siguen vigentes.
-                  </p>
+                  <h3>{c.priorities.empty.title}</h3>
+                  <p style={{ marginBottom: 0 }}>{c.priorities.empty.text}</p>
                 </div>
               ) : (
-                model.priorities.map((priority, i) => (
+                c.priorities.items.map((priority) => (
                   <article className={s.priority} key={priority.themeId}>
                     <div className={s.rank}>{priority.rank}</div>
                     <div>
                       <h3>{priority.title}</h3>
                       <p className={s.priorityLine}>
-                        <b>Hallazgo:</b> {priority.finding}
+                        <b>{priority.findingLabel}</b> {priority.finding}
                       </p>
                       <p className={s.priorityLine}>
-                        <b>Acción recomendada:</b> {priority.action}
+                        <b>{priority.actionLabel}</b> {priority.action}
                       </p>
                       <SourceLine kind="det" tag="REGLAS · HALLAZGO + ACCIÓN" />
                       <AiBox
                         title="Contexto breve para esta prioridad"
                         limit={`${MAX_CONTEXT_WORDS} palabras máx.`}
-                        text={narrative.priorityContexts[i] ?? priority.context}
+                        text={priority.context}
                       />
                     </div>
                   </article>
@@ -469,13 +449,9 @@ export default function ReportView({
 
             {/* 05 · Plan de acción + CTA */}
             <section className={s.section} id="plan" data-report-section>
-              <SectionHeader
-                num="05"
-                title={'Tu plan de acción'}
-                sub="Pasos iniciales elegidos de un catálogo de acciones aprobadas."
-              />
+              <SectionHeader num={c.plan.num} title={c.plan.title} sub={c.plan.sub} />
               <div className={s.timeline}>
-                {model.plan.map((step) => (
+                {c.plan.steps.map((step) => (
                   <div className={s.step} key={step.title}>
                     <small>{step.stage}</small>
                     <h3>{step.title}</h3>
@@ -490,19 +466,16 @@ export default function ReportView({
               />
 
               <div className={s.cta}>
-                <h3>Da el siguiente paso para proteger tu patrimonio.</h3>
-                <p>
-                  Un asesor de Quirón puede ayudarte a validar los hallazgos y convertir este
-                  diagnóstico inicial en un plan personalizado.
-                </p>
-                {bookingUrl ? (
+                <h3>{c.cta.title}</h3>
+                <p>{c.cta.text}</p>
+                {c.cta.url ? (
                   <a
                     className={s.ctaButton}
-                    href={bookingUrl}
+                    href={c.cta.url}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    Agendar diagnóstico ↗
+                    {c.cta.buttonLabel} ↗
                   </a>
                 ) : (
                   <>
@@ -512,11 +485,10 @@ export default function ReportView({
                       disabled
                       aria-describedby="booking-unavailable"
                     >
-                      Agendar diagnóstico ↗
+                      {c.cta.buttonLabel} ↗
                     </button>
                     <small id="booking-unavailable" role="status" className={s.ctaNote}>
-                      El calendario de citas no está disponible por el momento. Escríbenos y con
-                      gusto te ayudamos a agendar.
+                      {c.cta.unavailableNote}
                     </small>
                   </>
                 )}
@@ -524,47 +496,30 @@ export default function ReportView({
               </div>
 
               {/* How this report was produced (reflects what actually happened for this report) */}
-              {!aiPending && (
-                <div className={s.transparency}>
-                  <h3>Cómo se elaboró este reporte</h3>
-                  {aiUsed ? (
-                    <>
-                      <MixBar />
-                      <div className={s.legendInline}>
-                        <span>
-                          <i className={cx(s.dot, s.dotDet)} /> 65% reglas y plantillas validadas
-                        </span>
-                        <span>
-                          <i className={cx(s.dot, s.dotStatic)} /> 20% interfaz fija
-                        </span>
-                        <span>
-                          <i className={cx(s.dot, s.dotAi)} /> 15% redacción con IA
-                        </span>
-                      </div>
-                      <p>
-                        El 85% de este reporte se genera con reglas y plantillas validadas por
-                        Quirón. Solo el 15% —el resumen ejecutivo y una breve explicación de cada
-                        prioridad— es redactado con ayuda de inteligencia artificial, que no calcula
-                        puntajes ni decide acciones.
-                      </p>
-                    </>
-                  ) : (
-                    <p>
-                      Este reporte se generó por completo con reglas y plantillas validadas por
-                      Quirón. La redacción asistida por inteligencia artificial no estuvo disponible
-                      en esta ocasión.
-                    </p>
-                  )}
-                </div>
-              )}
+              <div className={s.transparency}>
+                <h3>{c.transparency.title}</h3>
+                {c.transparency.aiUsed && (
+                  <>
+                    <MixBar />
+                    <div className={s.legendInline}>
+                      <span>
+                        <i className={cx(s.dot, s.dotDet)} /> {c.transparency.mixLegend[0]}
+                      </span>
+                      <span>
+                        <i className={cx(s.dot, s.dotStatic)} /> {c.transparency.mixLegend[1]}
+                      </span>
+                      <span>
+                        <i className={cx(s.dot, s.dotAi)} /> {c.transparency.mixLegend[2]}
+                      </span>
+                    </div>
+                  </>
+                )}
+                {c.transparency.paragraphs.map((paragraph) => (
+                  <p key={paragraph}>{paragraph}</p>
+                ))}
+              </div>
 
-              <p className={s.legal}>
-                Este reporte es una herramienta informativa preliminar basada en respuestas
-                autodeclaradas; no constituye ni sustituye asesoría legal, fiscal, financiera ni de
-                seguros personalizada, ni certificación de cobertura. Algunas preguntas pueden no
-                aplicar a todas las personas. Para un diagnóstico integral, consulta con
-                especialistas.
-              </p>
+              <p className={s.legal}>{c.legal}</p>
               <SourceLine
                 kind="static"
                 tag="INTERFAZ FIJA"
@@ -609,7 +564,8 @@ export default function ReportView({
                   no decide acciones.
                 </p>
                 <p className={s.footnote}>
-                  Esta vista: texto {aiUsed ? 'generado por IA' : 'de plantilla (fallback)'}.
+                  Esta vista: texto {aiUsed ? 'generado por IA' : 'de plantilla (fallback)'}
+                  {report.aiFailureReason ? ` · motivo: ${report.aiFailureReason}` : ''}.
                 </p>
               </div>
             </aside>

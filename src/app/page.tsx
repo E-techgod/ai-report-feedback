@@ -1,11 +1,11 @@
 'use client';
 import Image from 'next/image';
 import Link from 'next/link';
-import ReportView, { type Report } from '@/components/ReportView';
-import { useRef, useState } from 'react';
+import ReportView, { type EmailStatusView } from '@/components/ReportView';
+import { useEffect, useRef, useState } from 'react';
+import type { FinalReport } from '@/lib/final-report';
 import { questions } from '@/lib/questions';
 import { type Answers } from '@/lib/scoring';
-import { buildReportModel, fallbackNarrative } from '@/lib/report';
 
 export default function Home() {
   const [step, setStep] = useState(0);
@@ -16,9 +16,9 @@ export default function Home() {
   const [answers, setAnswers] = useState<Answers>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [report, setReport] = useState<Report | null>(null);
-  const [aiPending, setAiPending] = useState(false);
-  const [generatedAt, setGeneratedAt] = useState('');
+  const [report, setReport] = useState<FinalReport | null>(null);
+  const [access, setAccess] = useState<{ id: string; token: string } | null>(null);
+  const [emailStatus, setEmailStatus] = useState<EmailStatusView | null>(null);
   // One id per diagnosis so network retries/double clicks can't create duplicate rows.
   const submissionId = useRef<string | null>(null);
   const answered = Object.keys(answers).length;
@@ -56,58 +56,73 @@ export default function Home() {
       privacyAccepted: consent,
     };
     try {
-      const saved = await fetch('/api/questionnaire', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await saved.json();
-      if (!saved.ok || !data.ok)
-        throw new Error(data.error || 'No se pudo guardar el diagnóstico.');
-      // 1) Deterministic report (rules engine) + template text: shown immediately.
-      const model = buildReportModel(answers);
-      setReport({ model, narrative: fallbackNarrative(model), aiUsed: false });
-      setGeneratedAt(new Date().toISOString());
-      setAiPending(true);
-      setStep(3);
-      window.scrollTo({ top: 0 });
-      // 2) Optional AI wording for the 4 text slots; the template text stays if anything fails.
-      try {
-        const ai = await fetch('/api/summary', {
+      // The server saves the answers, generates the ONE finalized report and schedules the email.
+      // Safe to repeat: the same submission id always returns the same report.
+      let response: Response | undefined;
+      let data: Record<string, unknown> = {};
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        response = await fetch('/api/questionnaire', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(75_000),
         });
-        if (ai.ok) {
-          const result = await ai.json();
-          const contexts: unknown = result.priorityContexts;
-          if (
-            typeof result.executiveSummary === 'string' &&
-            Array.isArray(contexts) &&
-            contexts.length === model.priorities.length &&
-            contexts.every((c) => typeof c === 'string')
-          ) {
-            setReport({
-              model,
-              narrative: {
-                executiveSummary: result.executiveSummary,
-                priorityContexts: contexts as string[],
-              },
-              aiUsed: result.ai === true,
-            });
-          }
+        data = await response.json().catch(() => ({}));
+        if (response.status === 409 && data.retry) {
+          await new Promise((resolve) => setTimeout(resolve, 3000)); // same report is being prepared
+          continue;
         }
-      } catch {
-        /* deterministic template text stays visible */
-      } finally {
-        setAiPending(false);
+        break;
       }
+      if (!response?.ok || data.ok !== true) {
+        throw new Error(
+          typeof data.error === 'string' ? data.error : 'No se pudo generar el diagnóstico.',
+        );
+      }
+      setReport(data.report as FinalReport);
+      setAccess({ id: String(data.reportId), token: String(data.accessToken) });
+      setEmailStatus((data.email as EmailStatusView) ?? null);
+      setStep(3);
+      window.scrollTo({ top: 0 });
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Ocurrió un error.');
+      setError(
+        e instanceof Error && e.name !== 'TimeoutError' && e.name !== 'AbortError'
+          ? e.message
+          : 'El informe tardó más de lo esperado. Vuelve a intentarlo: tus respuestas no se perderán.',
+      );
     } finally {
       setBusy(false);
     }
   }
+
+  // While the email is still being sent, keep the status line truthful by asking the server.
+  useEffect(() => {
+    if (!access || emailStatus?.state !== 'sending') return;
+    let cancelled = false;
+    let tries = 0;
+    const timer = setInterval(async () => {
+      tries += 1;
+      try {
+        const res = await fetch(`/api/report/${access.id}`, {
+          headers: { 'x-report-token': access.token },
+          cache: 'no-store',
+        });
+        if (res.ok && !cancelled) {
+          const next = (await res.json()).email as EmailStatusView;
+          setEmailStatus(next);
+          if (next.state !== 'sending') clearInterval(timer);
+        }
+      } catch {
+        /* keep the last known status */
+      }
+      if (tries >= 20) clearInterval(timer);
+    }, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [access, emailStatus?.state]);
+
   return (
     <div className="shell">
       <header className="header">
@@ -297,10 +312,18 @@ export default function Home() {
       {step === 3 && report && (
         <ReportView
           report={report}
-          firstName={firstName}
-          generatedAt={generatedAt}
-          aiPending={aiPending}
+          email={emailStatus}
+          pdf={access ? { url: `/api/report/${access.id}/pdf`, token: access.token } : null}
         />
+      )}
+      {busy && (
+        <div className="generating" role="status" aria-live="polite">
+          <div className="generating-card">
+            <span className="spinner" aria-hidden="true" />
+            <h2>Estamos generando tu informe personalizado</h2>
+            <p>Esto puede tardar hasta un minuto. Por favor no cierres esta página.</p>
+          </div>
+        </div>
       )}
       <footer>
         QUIRÓN · PROTECCIÓN PATRIMONIAL <span>© {new Date().getFullYear()}</span>
