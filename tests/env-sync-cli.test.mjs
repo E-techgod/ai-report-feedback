@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -125,11 +126,39 @@ test('Preview refuses a variable that already belongs to Production', async () =
   assert.match(r.err.join('\n'), /ambiguous in preview/);
 });
 
+test('CLI 66.2.0 repo.json link resolves from repository root and validates expected project', async () => {
+  const ws = workspace({ link: false });
+  const projectId = 'prj_vzVJy88okxdhvkpMiQJzbinudlid';
+  mkdirSync(path.join(ws.dir, '.vercel'));
+  writeFileSync(
+    path.join(ws.dir, '.vercel', 'repo.json'),
+    JSON.stringify({
+      remoteName: 'origin',
+      projects: [{ id: projectId, name: 'ai-report-feedback', directory: '.', orgId: IDS.orgId }],
+    }),
+  );
+  const wrong = run(ws, ['--target', 'preview', '--expect-project', IDS.projectId]);
+  assert.equal(await wrong.done, 1);
+  assert.match(wrong.err.join('\n'), /does not match the linked Vercel project/);
+  assert.equal(calls(ws).length, 0);
+
+  const right = run(ws, ['--target', 'preview', '--expect-project', projectId]);
+  await prompted(right.term);
+  right.term.answer('no');
+  assert.equal(await right.done, 0, right.err.join('\n'));
+  assert.match(right.out.join('\n'), new RegExp(projectId));
+  assert.match(right.out.join('\n'), /\.vercel\/repo\.json/);
+  assert.equal(addCalls(ws).length, 0);
+});
+
 test('parseArgs rejects unknown options and missing values, including a flag used as a value', () => {
   assert.throws(() => parseArgs(['--bogus']), /Unknown option: --bogus/);
   assert.throws(() => parseArgs(['--yes']), /Unknown option/); // there is no non-interactive bypass
   assert.throws(() => parseArgs(['--force']), /Unknown option/);
-  assert.throws(() => parseArgs(['--target', 'preview', '--target', 'production']), /only be specified once/);
+  assert.throws(
+    () => parseArgs(['--target', 'preview', '--target', 'production']),
+    /only be specified once/,
+  );
   assert.throws(() => parseArgs(['--check', '--target', 'preview']), /compares both targets/);
   for (const flag of ['--env-file', '--only', '--expect-project', '--expect-org']) {
     assert.throws(() => parseArgs([flag]), /needs a value/, flag);

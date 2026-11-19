@@ -60,7 +60,7 @@ npm run env:sync:preview -- --dry-run                    # read-only Preview pla
 npm run env:sync:production -- --only EMAIL_FROM,RESEND_API_KEY --expect-project prj_xxx
 ```
 
-Run `env:check` first: it prints the resolved `projectId` / `orgId` (from `.vercel/project.json`), names, and `create`, `update`, `skip`, or `blocked` for each target. `update` means an existing target-only record would be overwritten; the CLI does not reveal its value, so the check cannot tell whether the value already matches `.env`. The check never writes and exits 1 whenever an apply would be refused. An apply **requires** `--expect-project <that projectId>` (and optionally `--expect-org`) and an interactive confirmation.
+Run `env:check` first: it prints the resolved `projectId` / `orgId` (from `.vercel/repo.json` in Vercel CLI 66.2.0, or `.vercel/project.json` in older links), names, and `create`, `update`, `skip`, or `blocked` for each target. `update` means an existing target-only record would be overwritten; the CLI does not reveal its value, so the check cannot tell whether the value already matches `.env`. The check never writes and exits 1 whenever an apply would be refused. An apply **requires** `--expect-project <that projectId>` (and optionally `--expect-org`) and an interactive confirmation.
 
 Other options: `--offline` (dry run without calling the CLI) and `--env-file <path>`.
 

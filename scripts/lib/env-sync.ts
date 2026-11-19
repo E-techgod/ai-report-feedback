@@ -549,37 +549,77 @@ export function assertEnvFileProtected(file: string, cwd: string): void {
 
 export type ProjectIdentity = { projectId: string; orgId: string };
 export type IdentityResult =
-  | { ok: true; identity: ProjectIdentity; notes: string[] }
+  | { ok: true; identity: ProjectIdentity; source: string; notes: string[] }
   | { ok: false; reason: string };
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{3,128}$/;
 
 /**
- * Which Vercel project would the CLI write to? `.vercel/project.json` is the link; the CLI also honours
+ * Which Vercel project would the CLI write to? The link is `.vercel/project.json` in older CLI
+ * versions and a root-directory entry in `.vercel/repo.json` in CLI 66.2.0. The CLI also honours
  * VERCEL_ORG_ID + VERCEL_PROJECT_ID from the environment, which silently win over the link. Any
  * disagreement between the two is an error, never a guess.
  */
 export function resolveProjectIdentity(cwd: string, env: NodeJS.ProcessEnv): IdentityResult {
-  const file = path.join(cwd, '.vercel', 'project.json');
-  if (!existsSync(file))
+  const legacyFile = path.join(cwd, '.vercel', 'project.json');
+  const repoFile = path.join(cwd, '.vercel', 'repo.json');
+  if (!existsSync(legacyFile) && !existsSync(repoFile))
     return {
       ok: false,
       reason: 'Project is not linked to Vercel: run `vercel link` first (this tool never links)',
     };
-  let link: unknown;
-  try {
-    link = JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    return { ok: false, reason: '.vercel/project.json is not valid JSON' };
+  const parseFile = (file: string): unknown => JSON.parse(readFileSync(file, 'utf8'));
+  const validIdentity = (projectId: unknown, orgId: unknown): projectId is string =>
+    typeof projectId === 'string' &&
+    typeof orgId === 'string' &&
+    ID_PATTERN.test(projectId) &&
+    ID_PATTERN.test(orgId);
+  let legacy: ProjectIdentity | undefined;
+  if (existsSync(legacyFile)) {
+    let parsed: unknown;
+    try {
+      parsed = parseFile(legacyFile);
+    } catch {
+      return { ok: false, reason: '.vercel/project.json is not valid JSON' };
+    }
+    const { projectId, orgId } = (parsed ?? {}) as Record<string, unknown>;
+    if (!validIdentity(projectId, orgId))
+      return { ok: false, reason: '.vercel/project.json has no valid projectId/orgId' };
+    legacy = { projectId, orgId: orgId as string };
   }
-  const { projectId, orgId } = (link ?? {}) as Record<string, unknown>;
+  let repository: ProjectIdentity | undefined;
+  if (existsSync(repoFile)) {
+    let parsed: unknown;
+    try {
+      parsed = parseFile(repoFile);
+    } catch {
+      return { ok: false, reason: '.vercel/repo.json is not valid JSON' };
+    }
+    const projects = (parsed as { projects?: unknown } | null)?.projects;
+    if (!Array.isArray(projects))
+      return { ok: false, reason: '.vercel/repo.json has no valid projects array' };
+    const root = path.resolve(cwd);
+    const matching = projects.filter(
+      (project): project is Record<string, unknown> =>
+        typeof project === 'object' &&
+        project !== null &&
+        typeof project.directory === 'string' &&
+        path.resolve(root, project.directory) === root,
+    );
+    if (matching.length !== 1)
+      return { ok: false, reason: '.vercel/repo.json must have exactly one project for this repository root' };
+    const { id, orgId } = matching[0];
+    if (!validIdentity(id, orgId))
+      return { ok: false, reason: '.vercel/repo.json root project has no valid id/orgId' };
+    repository = { projectId: id, orgId: orgId as string };
+  }
   if (
-    typeof projectId !== 'string' ||
-    typeof orgId !== 'string' ||
-    !ID_PATTERN.test(projectId) ||
-    !ID_PATTERN.test(orgId)
+    legacy && repository &&
+    (legacy.projectId !== repository.projectId || legacy.orgId !== repository.orgId)
   )
-    return { ok: false, reason: '.vercel/project.json has no valid projectId/orgId' };
+    return { ok: false, reason: '.vercel/project.json and .vercel/repo.json disagree; refusing to guess the target' };
+  const { projectId, orgId } = repository ?? legacy!;
+  const source = repository ? '.vercel/repo.json' : '.vercel/project.json';
 
   const notes: string[] = [];
   const envOrg = env.VERCEL_ORG_ID ?? env.NOW_ORG_ID;
@@ -589,13 +629,13 @@ export function resolveProjectIdentity(cwd: string, env: NodeJS.ProcessEnv): Ide
       return {
         ok: false,
         reason:
-          'VERCEL_ORG_ID / VERCEL_PROJECT_ID in the environment do not match .vercel/project.json ' +
+          `VERCEL_ORG_ID / VERCEL_PROJECT_ID in the environment do not match ${source} ` +
           '(the CLI would use the environment values): unset them or fix the link',
       };
     notes.push('VERCEL_ORG_ID / VERCEL_PROJECT_ID are set in the environment and match the link');
   }
   if (env.VERCEL_TOKEN) notes.push('VERCEL_TOKEN from the environment will authenticate the CLI');
-  return { ok: true, identity: { projectId, orgId }, notes };
+  return { ok: true, identity: { projectId, orgId }, source, notes };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -650,7 +690,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   log(`Source: ${path.relative(cwd, file)} (git-ignored)   Target: Vercel ${target}`);
   if (identityResult.ok) {
     log(
-      `Vercel project: projectId=${identityResult.identity.projectId} orgId=${identityResult.identity.orgId} (.vercel/project.json)`,
+      `Vercel project: projectId=${identityResult.identity.projectId} orgId=${identityResult.identity.orgId} (${identityResult.source})`,
     );
     for (const note of identityResult.notes) log(`  note: ${note}`);
   } else {
