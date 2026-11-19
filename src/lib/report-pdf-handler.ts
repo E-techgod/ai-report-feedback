@@ -4,6 +4,7 @@ import { pdfFilename } from './email';
 import { verifyReportAccessToken } from './final-report';
 import { NO_STORE, ipLimited } from './services';
 import type { PipelineDeps } from './pipeline';
+import { safeError } from './store';
 
 const fail = (status: number) => new NextResponse(null, { status, headers: NO_STORE });
 
@@ -22,7 +23,15 @@ export async function handlePdfDownload(
 
   const record = await deps.store.getById(id);
   if (!record) return fail(404);
-  const pdf = await deps.renderPdf(record.report);
+  let pdf: Buffer;
+  try {
+    pdf = await deps.renderPdf(record.report);
+  } catch (error) {
+    // Named log line (no report content) so a runtime packaging/render failure is diagnosable
+    // from the function logs; nothing is recorded as downloaded.
+    console.error(`[pdf] report ${id}: render-failed: ${safeError(error)}`);
+    return fail(500);
+  }
   try {
     // Persist the event before returning; Sheets remains an asynchronous projection.
     await deps.store.markPdfDownloaded(id, new Date());
