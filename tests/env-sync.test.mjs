@@ -16,6 +16,7 @@ import {
   assertNoSecrets,
   baseEnv,
   calls,
+  setKnobs,
   verbs,
   workspace,
 } from './helpers/env-sync-fixtures.mjs';
@@ -32,7 +33,11 @@ const {
   buildPlan,
   classifyVariable,
   createVercelRunner,
+  customEnvironmentsArgs,
+  parseCustomEnvironments,
   parseEnvList,
+  readProjectState,
+  stateFingerprint,
   redact,
   resolveProjectIdentity,
   runSync,
@@ -101,6 +106,20 @@ test('opt-in secrets need both --only and the rotation flag, and the flag needs 
 // -------------------------------------------------------------------------- listing and classify
 
 const listOf = (envs) => parseEnvList(JSON.stringify({ envs }));
+const rec = (key, targets, gitBranch = null, extra = {}) => ({
+  key,
+  targets,
+  gitBranch,
+  customEnvironmentIds: [],
+  createdAt: null,
+  updatedAt: null,
+  ...extra,
+});
+/** A verified project state, as readProjectState would return it. */
+const stateOf = (envs, customEnvironments = 0) => ({
+  ...listOf(envs),
+  customEnvironments,
+});
 
 test('parseEnvList keeps metadata only and accepts the shapes the CLI emits', () => {
   const result = listOf([
@@ -111,10 +130,10 @@ test('parseEnvList keeps metadata only and accepts the shapes the CLI emits', ()
   ]);
   assert.equal(result.ok, true);
   assert.deepEqual(result.records, [
-    { key: 'A', targets: ['production'], gitBranch: null },
-    { key: 'B', targets: ['preview'], gitBranch: 'feat/x' },
-    { key: 'C', targets: [], gitBranch: null },
-    { key: 'D', targets: [], gitBranch: null },
+    rec('A', ['production']),
+    rec('B', ['preview'], 'feat/x'),
+    rec('C', []),
+    rec('D', []),
   ]);
   assert.doesNotMatch(JSON.stringify(result), new RegExp(SECRET_A));
   assert.deepEqual(parseEnvList('{"envs":[]}'), { ok: true, records: [] });
@@ -147,13 +166,12 @@ test('parseEnvList rejects malformed or unexpected output instead of guessing', 
 });
 
 test('classification is fail-closed: only absent or Production-only variables are writable', () => {
-  const rec = (key, targets, gitBranch = null) => ({ key, targets, gitBranch });
-  assert.deepEqual(classifyVariable('X', []), { kind: 'create' });
-  assert.deepEqual(classifyVariable('X', [rec('OTHER', ['production', 'preview'])]), {
+  assert.deepEqual(classifyVariable('X', [], 0), { kind: 'create' });
+  assert.deepEqual(classifyVariable('X', [rec('OTHER', ['production', 'preview'])], 0), {
     kind: 'create',
   });
-  assert.deepEqual(classifyVariable('X', [rec('X', ['production'])]), { kind: 'update' });
-  assert.deepEqual(classifyVariable('X', [rec('X', ['production', 'production'])]), {
+  assert.deepEqual(classifyVariable('X', [rec('X', ['production'])], 0), { kind: 'update' });
+  assert.deepEqual(classifyVariable('X', [rec('X', ['production', 'production'])], 0), {
     kind: 'update',
   });
   const blockedCases = {
@@ -168,8 +186,8 @@ test('classification is fail-closed: only absent or Production-only variables ar
     duplicate: [rec('X', ['production']), rec('X', ['production'])],
   };
   for (const [label, records] of Object.entries(blockedCases))
-    assert.equal(classifyVariable('X', records).kind, 'blocked', label);
-  assert.match(classifyVariable('X', blockedCases.shared).reason, /preview, development/);
+    assert.equal(classifyVariable('X', records, 0).kind, 'blocked', label);
+  assert.match(classifyVariable('X', blockedCases.shared, 0).reason, /preview, development/);
 });
 
 test('the plan has names and operations only, and marks blocked and unverified variables', () => {
@@ -179,7 +197,7 @@ test('the plan has names and operations only, and marks blocked and unverified v
     EMAIL_FROM: '  ',
     APP_URL: 'u',
   };
-  const list = listOf([
+  const list = stateOf([
     { key: 'GOOGLE_SHEET_ID', target: ['production'] },
     { key: 'APP_URL', target: ['production', 'preview'] },
     { key: 'DATABASE_URL', target: ['production'] },
@@ -296,7 +314,7 @@ test('dry run prints the project and names, never values, and only reads', async
   assert.match(output, /skip\s+EMAIL_FROM/);
   assert.match(output, /DRY RUN/);
   assertNoSecrets(assert, output);
-  assert.deepEqual(verbs(ws), ['env ls']);
+  assert.deepEqual(verbs(ws), ['env ls', `api ${customEnvironmentsArgs(IDS.projectId)[1]}`]); // reads only: listing + custom environments
   assert.deepEqual(calls(ws)[0].argv, ['env', 'ls', '--format', 'json']);
   assert.ok(!output.includes('REPORT_TOKEN_SECRET'), 'opt-in secrets are not even planned');
 });
@@ -398,7 +416,10 @@ test('apply sends values on stdin only, pins the project, and touches nothing el
     ['GOOGLE_PRIVATE_KEY', 'ANTHROPIC_API_KEY', 'RESEND_WEBHOOK_SECRET'],
   );
   for (const call of adds) {
-    assert.deepEqual(call.argv, ['env', 'add', call.argv[2], 'production', '--force']);
+    // only the pre-existing, proven Production-only variable is overwritten with --force
+    const expected = ['env', 'add', call.argv[2], 'production'];
+    if (call.argv[2] === 'ANTHROPIC_API_KEY') expected.push('--force');
+    assert.deepEqual(call.argv, expected);
     for (const secret of SECRETS)
       assert.ok(!call.argv.join(' ').includes(secret), 'secret in argv');
   }
@@ -407,7 +428,13 @@ test('apply sends values on stdin only, pins the project, and touches nothing el
   // The CLI is pinned to the identity that was displayed and confirmed.
   for (const call of recorded)
     assert.deepEqual([call.project, call.org], [IDS.projectId, IDS.orgId]);
-  assert.ok(recorded.every((c) => ['env ls', 'env add'].includes(`${c.argv[0]} ${c.argv[1]}`)));
+  assert.ok(
+    recorded.every((c) =>
+      ['env ls', 'env add', `api ${customEnvironmentsArgs(IDS.projectId)[1]}`].includes(
+        `${c.argv[0]} ${c.argv[1]}`,
+      ),
+    ),
+  );
   const touched = adds.map((c) => c.argv[2]);
   for (const forbidden of [
     'REPORT_EMAIL_ENABLED',
@@ -536,4 +563,317 @@ test('an env file outside the repository is refused', () => {
   spawnSync('git', ['init', '-q'], { cwd: path.join(dir, 'repo') });
   writeFileSync(path.join(dir, 'secrets.env'), 'X=1\n');
   assert.throws(() => assertEnvFileProtected('../secrets.env', path.join(dir, 'repo')));
+});
+
+// ------------------------------------- B1/B2: create vs update, hidden, custom environments, TOCTOU
+
+const only = (names) => ({ only: names });
+const withAdds = (ws) => addCalls(ws).map((c) => [c.argv[2], c.argv.includes('--force')]);
+
+test('parseEnvList refuses a listing that says it is incomplete (hidden records, pagination)', () => {
+  const doc = (extra) => JSON.stringify({ envs: [{ key: 'A', target: ['production'] }], ...extra });
+  assert.equal(parseEnvList(doc({ hiddenProductionEnvCount: 0 })).ok, true);
+  assert.equal(parseEnvList(doc({ pagination: { count: 1, next: null } })).ok, true);
+  const hidden = parseEnvList(doc({ hiddenProductionEnvCount: 2 }));
+  assert.equal(hidden.ok, false);
+  assert.match(hidden.reason, /2 Production variable\(s\) are hidden/);
+  const paged = parseEnvList(doc({ pagination: { count: 1, next: 1700000000000 } }));
+  assert.equal(paged.ok, false);
+  assert.match(paged.reason, /more pages/);
+  for (const extra of [{ hiddenProductionEnvCount: 'x' }, { pagination: 'x' }])
+    assert.match(parseEnvList(doc(extra)).reason, /unexpected output/);
+});
+
+test('parseEnvList keeps customEnvironmentIds when emitted and rejects a malformed value', () => {
+  const ok = listOf([{ key: 'A', target: ['production'], customEnvironmentIds: ['env_1'] }]);
+  assert.deepEqual(ok.records[0].customEnvironmentIds, ['env_1']);
+  assert.deepEqual(listOf([{ key: 'A' }]).records[0].customEnvironmentIds, []);
+  for (const bad of ['env_1', [1], { a: 1 }])
+    assert.match(
+      listOf([{ key: 'A', customEnvironmentIds: bad }]).reason,
+      /malformed customEnvironmentIds/,
+    );
+});
+
+test('parseCustomEnvironments counts environments and fails closed on anything else', () => {
+  assert.deepEqual(parseCustomEnvironments('{"environments":[]}'), { ok: true, count: 0 });
+  assert.deepEqual(parseCustomEnvironments('{"environments":[{"id":"a"},{"id":"b"}]}'), {
+    ok: true,
+    count: 2,
+  });
+  assert.equal(parseCustomEnvironments(`Vercel CLI\n{"environments":[]}\n`).ok, true);
+  for (const bad of ['', 'nope', '[]', '{}', '{"environments":{"a":1}}', 'null'])
+    assert.match(parseCustomEnvironments(bad).reason, /unexpected output/, JSON.stringify(bad));
+  assert.equal(parseCustomEnvironments('{"environments":[],"pagination":{"next":5}}').ok, false);
+});
+
+test('with custom environments an existing Production-only variable is never an update', () => {
+  const production = [rec('X', ['production'])];
+  assert.equal(classifyVariable('X', production, 0).kind, 'update');
+  const blocked = classifyVariable('X', production, 1);
+  assert.equal(blocked.kind, 'blocked');
+  assert.match(blocked.reason, /1 custom environment\(s\)/);
+  // a variable that does not exist can still be created: a create writes Production only
+  assert.deepEqual(classifyVariable('X', [], 3), { kind: 'create' });
+  // a record the listing itself ties to a custom environment is blocked even with a zero count
+  const shared = classifyVariable(
+    'X',
+    [rec('X', ['production'], null, { customEnvironmentIds: ['e1'] })],
+    0,
+  );
+  assert.equal(shared.kind, 'blocked');
+  assert.match(shared.reason, /custom environment/);
+  // unknown or nonsensical counts are "unverified", never "zero"
+  for (const count of [undefined, null, -1, 1.5, Number.NaN, '0'])
+    assert.equal(classifyVariable('X', production, count).kind, 'blocked', String(count));
+});
+
+test('the state fingerprint covers matching records, change stamps and custom environments only', () => {
+  const base = stateOf([
+    { key: 'A', target: ['production'], updatedAt: 1 },
+    { key: 'Z', target: ['preview'] },
+  ]);
+  const fp = (state, names = ['A']) => stateFingerprint(names, state);
+  assert.equal(fp(base), fp(stateOf([{ key: 'A', target: ['production'], updatedAt: 1 }])));
+  assert.notEqual(fp(base), fp(stateOf([{ key: 'A', target: ['production'], updatedAt: 2 }])));
+  assert.notEqual(
+    fp(base),
+    fp(stateOf([{ key: 'A', target: ['production', 'preview'], updatedAt: 1 }])),
+  );
+  assert.notEqual(fp(base), fp(stateOf([], 0)));
+  assert.notEqual(fp(base), fp({ ...base, customEnvironments: 1 }));
+  assert.equal(
+    fp(base, ['A']),
+    fp(
+      stateOf([
+        { key: 'A', target: ['production'], updatedAt: 1 },
+        { key: 'Z', target: [] },
+      ]),
+    ),
+  );
+  assert.notEqual(fp(base), fp({ ok: false, reason: 'x' }));
+});
+
+test('readProjectState needs both the listing and the custom environments', async () => {
+  const runner = (list, custom) => ({
+    listRecords: async () => list,
+    listCustomEnvironments: async () => custom,
+  });
+  const good = await readProjectState(runner({ ok: true, records: [] }, { ok: true, count: 2 }));
+  assert.deepEqual(good, { ok: true, records: [], customEnvironments: 2 });
+  const noList = await readProjectState(
+    runner({ ok: false, reason: 'boom' }, { ok: true, count: 0 }),
+  );
+  assert.deepEqual(noList, { ok: false, reason: 'boom' });
+  const noCustom = await readProjectState(
+    runner({ ok: true, records: [] }, { ok: false, reason: 'nope' }),
+  );
+  assert.deepEqual(noCustom, { ok: false, reason: 'custom environments: nope' });
+});
+
+test('the custom-environments request names the pinned project and carries no secrets', async () => {
+  assert.deepEqual(customEnvironmentsArgs('prj_x'), [
+    'api',
+    '/v9/projects/prj_x/custom-environments',
+  ]);
+  assert.deepEqual(customEnvironmentsArgs('a/b c'), [
+    'api',
+    '/v9/projects/a%2Fb%20c/custom-environments',
+  ]);
+  const ws = workspace();
+  const h = harness(ws, { dryRun: true });
+  await runSync(h.options);
+  const api = calls(ws).find((c) => c.argv[0] === 'api');
+  assert.deepEqual(api.argv, customEnvironmentsArgs(IDS.projectId));
+  assert.deepEqual([api.project, api.org], [IDS.projectId, IDS.orgId]);
+  assert.equal(api.stdin, '');
+});
+
+test('B1: a create never passes --force; only a proven Production-only update does', async () => {
+  const ws = workspace();
+  const h = harness(ws, {}, { FAKE_EXISTING: 'ANTHROPIC_API_KEY' });
+  await runSync(h.options);
+  assert.deepEqual(withAdds(ws), [
+    ['GOOGLE_PRIVATE_KEY', false],
+    ['ANTHROPIC_API_KEY', true],
+    ['RESEND_WEBHOOK_SECRET', false],
+  ]);
+});
+
+test('B1: a Production record hidden from the listing makes the create fail instead of being overwritten', async () => {
+  const ws = workspace();
+  const h = harness(ws, {}, { FAKE_HIDDEN: 'GOOGLE_PRIVATE_KEY' });
+  await assert.rejects(runSync(h.options), /Synchronization failed/);
+  // planned as a create (the listing never showed it): no --force, so the CLI refused it, and the
+  // run stopped before touching anything else
+  assert.deepEqual(withAdds(ws), [['GOOGLE_PRIVATE_KEY', false]]);
+  assert.match(h.lines.join('\n'), /FAILED GOOGLE_PRIVATE_KEY: .*already exists/);
+  assert.match(h.lines.join('\n'), /Already written: none/);
+});
+
+test('B1: a listing that is incomplete cannot establish absence, so nothing is written', async () => {
+  for (const extra of [
+    { hiddenProductionEnvCount: 1 },
+    { pagination: { count: 20, next: 1700000000000 } },
+  ]) {
+    const ws = workspace();
+    const h = harness(ws, {}, { FAKE_LS_EXTRA: JSON.stringify(extra) });
+    await assert.rejects(
+      runSync(h.options),
+      /Cannot verify existing variables.*incomplete listing/,
+    );
+    assert.equal(addCalls(ws).length, 0);
+    assert.equal(h.asked.length, 0);
+
+    const dry = harness(workspace(), { dryRun: true }, { FAKE_LS_EXTRA: JSON.stringify(extra) });
+    const result = await runSync(dry.options);
+    assert.match(result.problems.join(), /incomplete listing/);
+    assert.match(dry.lines.join('\n'), /upsert\s+ANTHROPIC_API_KEY/);
+  }
+});
+
+test('B2: if custom environments cannot be read, nothing is written and nobody is asked', async () => {
+  for (const env of [
+    { FAKE_API_FAIL: '1' },
+    { FAKE_API_RAW: 'garbage' },
+    { FAKE_API_RAW: '{"environments": "x"}' },
+    { FAKE_API_RAW: '' },
+  ]) {
+    const ws = workspace();
+    const h = harness(ws, {}, env);
+    await assert.rejects(
+      runSync(h.options),
+      /Cannot verify existing variables \(custom environments:/,
+    );
+    assert.equal(addCalls(ws).length, 0);
+    assert.equal(h.asked.length, 0);
+
+    const dry = harness(workspace(), { dryRun: true }, env);
+    assert.match((await runSync(dry.options)).problems.join(), /custom environments:/);
+  }
+});
+
+test('B2: with custom environments an existing variable is blocked, even when it looks Production-only', async () => {
+  const ws = workspace();
+  const h = harness(
+    ws,
+    {},
+    {
+      FAKE_EXISTING: 'ANTHROPIC_API_KEY',
+      FAKE_CUSTOM_ENVS: JSON.stringify([{ id: 'env_stg', slug: 'staging' }]),
+    },
+  );
+  await assert.rejects(runSync(h.options), /Refusing to apply: ANTHROPIC_API_KEY ambiguous/);
+  assert.match(h.lines.join('\n'), /blocked\s+ANTHROPIC_API_KEY.*1 custom environment/);
+  assert.match(h.lines.join('\n'), /custom environments: 1/);
+  assert.equal(addCalls(ws).length, 0);
+  assert.equal(h.asked.length, 0);
+});
+
+test('B2: with custom environments, creating brand-new variables is still allowed (and never forced)', async () => {
+  const ws = workspace();
+  const h = harness(ws, {}, { FAKE_CUSTOM_ENVS: JSON.stringify([{ id: 'env_stg' }]) });
+  const result = await runSync(h.options);
+  assert.equal(result.modified, true);
+  assert.ok(withAdds(ws).every(([, forced]) => forced === false));
+});
+
+test('TOCTOU: the state is read again after the confirmation and before the first write', async () => {
+  const ws = workspace();
+  const seen = [];
+  const h = harness(ws, {
+    confirm: async (summary, phrase) => (
+      seen.push(calls(ws).length),
+      h.asked.push({ summary, phrase }),
+      true
+    ),
+  });
+  await runSync(h.options);
+  assert.deepEqual(seen, [2]); // one listing + one custom-environment read before the prompt
+  assert.deepEqual(
+    verbs(ws).map((v) => v.split(' ')[0] + ' ' + v.split(' ')[1].slice(0, 3)),
+    ['env ls', 'api /v9', 'env ls', 'api /v9', 'env add', 'env add', 'env add'],
+  );
+});
+
+test('TOCTOU: declining the prompt does not re-read or write anything', async () => {
+  const ws = workspace();
+  await runSync(harness(ws, { confirm: async () => false }).options);
+  assert.equal(calls(ws).length, 2);
+});
+
+test('TOCTOU: a change between plan and apply is rejected and nothing is written', async () => {
+  const prod = (extra = {}) => ({ key: 'ANTHROPIC_API_KEY', target: ['production'], ...extra });
+  const scenarios = {
+    'create became an update': [[], [prod()]],
+    'update became shared': [[prod()], [prod({ target: ['production', 'preview'] })]],
+    'update was modified': [[prod({ updatedAt: 1 })], [prod({ updatedAt: 2 })]],
+    'update was split': [[prod()], [prod(), { key: 'ANTHROPIC_API_KEY', target: ['preview'] }]],
+    'update was deleted': [[prod()], []],
+    'got a branch scope': [[prod()], [prod({ gitBranch: 'main' })]],
+  };
+  for (const [label, [first, second]] of Object.entries(scenarios)) {
+    const ws = workspace();
+    const h = harness(ws, {}, { FAKE_LS_SEQ: JSON.stringify([first, second]) });
+    await assert.rejects(
+      runSync(h.options),
+      /changed after the plan was shown; nothing was written/,
+      label,
+    );
+    assert.equal(addCalls(ws).length, 0, label);
+    assert.equal(h.asked.length, 1, label); // the operator was asked once; the re-check then refused
+    assertNoSecrets(assert, h.lines.join('\n'), label);
+  }
+});
+
+test('TOCTOU: custom environments appearing between plan and apply are rejected', async () => {
+  const ws = workspace();
+  const h = harness(ws, {}, { FAKE_EXISTING: 'ANTHROPIC_API_KEY' });
+  h.options.confirm = async () => {
+    setKnobs(ws, { FAKE_CUSTOM_ENVS: JSON.stringify([{ id: 'env_new' }]) });
+    return true;
+  };
+  await assert.rejects(runSync(h.options), /changed after the plan was shown/);
+  assert.equal(addCalls(ws).length, 0);
+});
+
+test('TOCTOU: if the re-read fails, nothing is written', async () => {
+  for (const knobs of [{ FAKE_LS_FAIL: '1' }, { FAKE_API_FAIL: '1' }]) {
+    const ws = workspace();
+    const h = harness(ws);
+    h.options.confirm = async () => (setKnobs(ws, knobs), true);
+    await assert.rejects(runSync(h.options), /Cannot re-verify existing variables/);
+    assert.equal(addCalls(ws).length, 0);
+  }
+});
+
+test('TOCTOU: an unchanged state passes the re-check (stamps included)', async () => {
+  const ws = workspace();
+  const same = [{ key: 'ANTHROPIC_API_KEY', target: ['production'], updatedAt: 5, createdAt: 1 }];
+  const h = harness(ws, {}, { FAKE_LS_SEQ: JSON.stringify([same, same]) });
+  const result = await runSync(h.options);
+  assert.equal(result.modified, true);
+  assert.deepEqual(
+    withAdds(ws).find(([name]) => name === 'ANTHROPIC_API_KEY'),
+    ['ANTHROPIC_API_KEY', true],
+  );
+});
+
+test('the preserved safeguards still hold with the new reads', async () => {
+  // opt-in secrets: still need the flag, and rotation still writes through create/update with a warning
+  const ws = workspace();
+  const h = harness(
+    ws,
+    { ...only(['CRON_SECRET', 'REPORT_TOKEN_SECRET']), allowRotation: true },
+    { FAKE_EXISTING: 'CRON_SECRET' },
+  );
+  await runSync(h.options);
+  assert.equal(h.asked[0].phrase, PHRASE_ROTATION);
+  assert.deepEqual(withAdds(ws), [
+    ['CRON_SECRET', true],
+    ['REPORT_TOKEN_SECRET', false],
+  ]);
+  for (const name of NEVER_SYNCED)
+    assert.throws(() => lib.selectNames?.([name]) ?? selectNames([name]), /allowlist/, name);
+  for (const call of calls(ws)) assert.ok(!call.argv.includes('rm'));
 });

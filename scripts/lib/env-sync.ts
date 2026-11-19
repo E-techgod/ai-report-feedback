@@ -11,6 +11,15 @@
  *    exists as exactly one Production-only record. A variable shared with Preview/Development, split
  *    across records, branch-scoped or of unknown scope is never touched (we cannot prove that an
  *    upsert would leave the other environments alone);
+ *  - a CREATE never uses `--force`, so the CLI/API refuses it if the variable exists after all (for
+ *    example a Production record the listing did not show); `--force` is only used to overwrite a
+ *    record that was proven to be a lone Production-only one;
+ *  - `vercel env ls --format json` does not report custom-environment membership, so a record with
+ *    target ["production"] could also belong to a custom environment. The project's custom
+ *    environments are therefore read as well: if they cannot be read, nothing is written; if any
+ *    exist, no existing variable is overwritten;
+ *  - the existing-variable state is read again after the operator confirms and before the first
+ *    write; if it differs from the plan that was shown, nothing is written;
  *  - the Vercel project is identified (projectId/orgId) before any write, pinned for the child
  *    process, and an apply must name the expected projectId;
  *  - the local env file must be git-ignored and untracked, or the run aborts;
@@ -88,31 +97,73 @@ export function readEnvFile(file: string): Record<string, string> {
 // ---------------------------------------------------------------------------------------------
 
 /** Only metadata is ever kept from the listing; values are never read. */
-export type EnvRecord = { key: string; targets: string[]; gitBranch: string | null };
+export type EnvRecord = {
+  key: string;
+  targets: string[];
+  gitBranch: string | null;
+  /**
+   * Custom environments the record belongs to. The current CLI never reports this (so it is empty
+   * even when the record is shared with one); it is honoured if a CLI version starts emitting it.
+   */
+  customEnvironmentIds: string[];
+  /** Change stamps, used only to notice that a record was modified between plan and apply. */
+  createdAt: number | null;
+  updatedAt: number | null;
+};
 export type ListResult = { ok: true; records: EnvRecord[] } | { ok: false; reason: string };
 
-export function parseEnvList(stdout: string): ListResult {
+/** JSON document from CLI output, tolerating stray non-JSON lines around it and nothing more. */
+function extractJson(stdout: string): unknown {
   const text = stdout.trim();
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
-    // Tolerate stray non-JSON lines around the document, nothing more.
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
     try {
-      parsed = start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : undefined;
+      return start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : undefined;
     } catch {
-      parsed = undefined;
+      return undefined;
     }
   }
+}
+
+/**
+ * A listing that says it is partial must never be trusted as "the variable does not exist".
+ * The Vercel API reports `hiddenProductionEnvCount` (Production records the caller cannot see) and a
+ * `pagination` cursor; the current CLI strips both from its JSON, but if either ever shows up as
+ * "more exists" we stop instead of guessing.
+ */
+function incompleteReason(document: unknown): string | null {
+  const { hiddenProductionEnvCount, pagination } = (document ?? {}) as Record<string, unknown>;
+  if (hiddenProductionEnvCount !== undefined && hiddenProductionEnvCount !== null) {
+    if (typeof hiddenProductionEnvCount !== 'number' || !Number.isFinite(hiddenProductionEnvCount))
+      return 'unexpected output (malformed hiddenProductionEnvCount)';
+    if (hiddenProductionEnvCount !== 0)
+      return `incomplete listing: ${hiddenProductionEnvCount} Production variable(s) are hidden from this account`;
+  }
+  if (pagination !== undefined && pagination !== null) {
+    if (typeof pagination !== 'object') return 'unexpected output (malformed pagination)';
+    const { next } = pagination as Record<string, unknown>;
+    if (next !== undefined && next !== null) return 'incomplete listing: more pages are available';
+  }
+  return null;
+}
+
+export function parseEnvList(stdout: string): ListResult {
+  const parsed = extractJson(stdout);
   const envs = (parsed as { envs?: unknown } | null | undefined)?.envs;
   if (!Array.isArray(envs)) return { ok: false, reason: 'unexpected output (no "envs" array)' };
+  const incomplete = incompleteReason(parsed);
+  if (incomplete) return { ok: false, reason: incomplete };
   const records: EnvRecord[] = [];
   for (const entry of envs) {
     if (typeof entry !== 'object' || entry === null)
       return { ok: false, reason: 'unexpected output (malformed record)' };
-    const { key, target, gitBranch } = entry as Record<string, unknown>;
+    const { key, target, gitBranch, createdAt, updatedAt, customEnvironmentIds } = entry as Record<
+      string,
+      unknown
+    >;
     if (typeof key !== 'string' || key === '')
       return { ok: false, reason: 'unexpected output (record without a key)' };
     let targets: string[];
@@ -123,10 +174,45 @@ export function parseEnvList(stdout: string): ListResult {
     else return { ok: false, reason: 'unexpected output (malformed target)' };
     if (gitBranch !== undefined && gitBranch !== null && typeof gitBranch !== 'string')
       return { ok: false, reason: 'unexpected output (malformed gitBranch)' };
-    records.push({ key, targets, gitBranch: (gitBranch as string | null | undefined) ?? null });
+    if (
+      customEnvironmentIds !== undefined &&
+      customEnvironmentIds !== null &&
+      !(
+        Array.isArray(customEnvironmentIds) &&
+        customEnvironmentIds.every((id) => typeof id === 'string')
+      )
+    )
+      return { ok: false, reason: 'unexpected output (malformed customEnvironmentIds)' };
+    const stamp = (value: unknown) => (typeof value === 'number' ? value : null);
+    records.push({
+      key,
+      targets,
+      gitBranch: (gitBranch as string | null | undefined) ?? null,
+      customEnvironmentIds: (customEnvironmentIds as string[] | null | undefined) ?? [],
+      createdAt: stamp(createdAt),
+      updatedAt: stamp(updatedAt),
+    });
   }
   return { ok: true, records };
 }
+
+export type CustomEnvResult = { ok: true; count: number } | { ok: false; reason: string };
+
+/** Output of `vercel api /v9/projects/<id>/custom-environments`: `{ environments: [...] }`. */
+export function parseCustomEnvironments(stdout: string): CustomEnvResult {
+  const parsed = extractJson(stdout);
+  const environments = (parsed as { environments?: unknown } | null | undefined)?.environments;
+  if (!Array.isArray(environments))
+    return { ok: false, reason: 'unexpected output (no "environments" array)' };
+  const incomplete = incompleteReason(parsed);
+  if (incomplete) return { ok: false, reason: incomplete };
+  return { ok: true, count: environments.length };
+}
+
+/** Everything about the project's variables that a write decision depends on. */
+export type ProjectState =
+  | { ok: true; records: EnvRecord[]; customEnvironments: number }
+  | { ok: false; reason: string };
 
 export type Classification =
   | { kind: 'create' }
@@ -134,10 +220,17 @@ export type Classification =
   | { kind: 'blocked'; reason: string };
 
 /**
- * Fail closed. Safe to write only when the variable is absent everywhere, or is exactly one
- * Production-only record without a branch. Anything else could be rewritten for other environments.
+ * Fail closed. Safe to write only when the variable is absent everywhere (a create, which never
+ * overwrites), or is exactly one Production-only record without a branch AND the project has no
+ * custom environments (the CLI listing cannot say whether such a record also belongs to one).
  */
-export function classifyVariable(name: string, records: readonly EnvRecord[]): Classification {
+export function classifyVariable(
+  name: string,
+  records: readonly EnvRecord[],
+  customEnvironments: number,
+): Classification {
+  if (!Number.isInteger(customEnvironments) || customEnvironments < 0)
+    return { kind: 'blocked', reason: 'custom environments could not be verified' };
   const mine = records.filter((record) => record.key === name);
   if (mine.length === 0) return { kind: 'create' };
   if (mine.length > 1)
@@ -147,8 +240,22 @@ export function classifyVariable(name: string, records: readonly EnvRecord[]): C
     };
   const [record] = mine;
   if (record.gitBranch) return { kind: 'blocked', reason: 'branch-scoped record' };
+  if (record.customEnvironmentIds.length > 0)
+    return {
+      kind: 'blocked',
+      reason: `shared with ${record.customEnvironmentIds.length} custom environment(s); split it in the dashboard first`,
+    };
   const targets = [...new Set(record.targets)];
-  if (targets.length === 1 && targets[0] === 'production') return { kind: 'update' };
+  if (targets.length === 1 && targets[0] === 'production') {
+    if (customEnvironments > 0)
+      return {
+        kind: 'blocked',
+        reason:
+          `the project has ${customEnvironments} custom environment(s) and the CLI listing does not show ` +
+          'which of them this variable belongs to; overwriting it could change them too',
+      };
+    return { kind: 'update' };
+  }
   const where = targets.length ? targets.join(', ') : 'no standard environment (custom?)';
   return {
     kind: 'blocked',
@@ -157,12 +264,34 @@ export function classifyVariable(name: string, records: readonly EnvRecord[]): C
 }
 
 /**
- * `list` = null or not ok means existing variables could not be verified: a present variable is then
- * an `upsert` (and an apply is refused). The plan contains names and operations, never values.
+ * Identifies the metadata a write decision rests on, for the given names only: matching records
+ * (with change stamps) and the number of custom environments. Never contains values.
+ */
+export function stateFingerprint(names: readonly string[], state: ProjectState): string {
+  if (!state.ok) return `unverified:${state.reason}`;
+  const wanted = new Set(names);
+  const records = state.records
+    .filter((record) => wanted.has(record.key))
+    .map((record) => [
+      record.key,
+      [...new Set(record.targets)].sort(),
+      record.gitBranch,
+      [...record.customEnvironmentIds].sort(),
+      record.createdAt,
+      record.updatedAt,
+    ])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return JSON.stringify({ customEnvironments: state.customEnvironments, records });
+}
+
+/**
+ * `state` = null or not ok means existing variables or custom environments could not be verified: a
+ * present variable is then an `upsert` (and an apply is refused). The plan contains names and
+ * operations, never values.
  */
 export function buildPlan(
   local: Record<string, string>,
-  list: ListResult | null,
+  state: ProjectState | null,
   names: readonly string[] = SYNC_DEFAULT,
 ): PlanItem[] {
   return names.map((name): PlanItem => {
@@ -170,8 +299,8 @@ export function buildPlan(
     if (value === undefined) return { name, operation: 'skip', note: 'not set in the local file' };
     if (value.trim() === '') return { name, operation: 'skip', note: 'empty value' };
     const note = PLAN_NOTES[name];
-    if (!list || !list.ok) return { name, operation: 'upsert', note: note ?? 'unverified' };
-    const verdict = classifyVariable(name, list.records);
+    if (!state || !state.ok) return { name, operation: 'upsert', note: note ?? 'unverified' };
+    const verdict = classifyVariable(name, state.records, state.customEnvironments);
     if (verdict.kind === 'blocked') return { name, operation: 'blocked', note: verdict.reason };
     return { name, operation: verdict.kind, note };
   });
@@ -279,8 +408,21 @@ export function redact(text: string, secrets: Iterable<string>): string {
 export interface VercelRunner {
   /** Existing variables of the linked project (metadata only), or why they could not be read. */
   listRecords(): Promise<ListResult>;
-  /** Create or overwrite one Production variable; the value is passed on stdin only. */
-  setVariable(name: string, value: string): Promise<void>;
+  /** How many custom environments the project has, or why that could not be established. */
+  listCustomEnvironments(): Promise<CustomEnvResult>;
+  /** Add a Production variable that must not exist yet (no `--force`); value on stdin only. */
+  createVariable(name: string, value: string): Promise<void>;
+  /** Overwrite a proven Production-only variable (`--force`); value on stdin only. */
+  updateVariable(name: string, value: string): Promise<void>;
+}
+
+/** Everything a write decision needs, read in one go. Any failure means "unverified". */
+export async function readProjectState(runner: VercelRunner): Promise<ProjectState> {
+  const list = await runner.listRecords();
+  if (!list.ok) return list;
+  const custom = await runner.listCustomEnvironments();
+  if (!custom.ok) return { ok: false, reason: `custom environments: ${custom.reason}` };
+  return { ok: true, records: list.records, customEnvironments: custom.count };
 }
 
 function run(
@@ -334,6 +476,12 @@ function reasonLine(result: { code: number | null; stdout: string; stderr: strin
   return (line ?? `exit ${result.code}`).slice(0, 200);
 }
 
+/** Arguments for reading a project's custom environments through the CLI's raw API command. */
+export const customEnvironmentsArgs = (projectId: string): string[] => [
+  'api',
+  `/v9/projects/${encodeURIComponent(projectId)}/custom-environments`,
+];
+
 export function createVercelRunner(options: {
   bin: string;
   cwd: string;
@@ -342,34 +490,40 @@ export function createVercelRunner(options: {
   secrets: () => Iterable<string>;
 }): VercelRunner {
   const { bin, cwd, env, secrets } = options;
+  const read = async <T extends { ok: boolean }>(
+    args: string[],
+    label: string,
+    parse: (stdout: string) => T,
+  ): Promise<T | { ok: false; reason: string }> => {
+    try {
+      const result = await run(bin, args, null, { cwd, env, secrets: secrets() });
+      if (result.code !== 0) return { ok: false, reason: `${label} failed: ${reasonLine(result)}` };
+      return parse(result.stdout);
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : 'could not run vercel' };
+    }
+  };
+  const write = async (value: string, args: string[]) => {
+    const result = await run(bin, args, value, { cwd, env, secrets: secrets() });
+    if (result.code !== 0) throw new Error(reasonLine(result));
+  };
   return {
-    async listRecords() {
-      try {
-        const result = await run(bin, ['env', 'ls', '--format', 'json'], null, {
-          cwd,
-          env,
-          secrets: secrets(),
-        });
-        if (result.code !== 0)
-          return { ok: false, reason: `vercel env ls failed: ${reasonLine(result)}` };
-        return parseEnvList(result.stdout);
-      } catch (error) {
-        return {
-          ok: false,
-          reason: error instanceof Error ? error.message : 'could not run vercel',
-        };
-      }
+    listRecords: () => read(['env', 'ls', '--format', 'json'], 'vercel env ls', parseEnvList),
+    listCustomEnvironments() {
+      const projectId = env.VERCEL_PROJECT_ID;
+      if (!projectId) return Promise.resolve({ ok: false, reason: 'project identity not pinned' });
+      return read(
+        customEnvironmentsArgs(projectId),
+        'vercel api (custom environments)',
+        parseCustomEnvironments,
+      );
     },
-    async setVariable(name, value) {
-      // `--force` upserts the Production record; the caller has already proven the variable is
-      // absent or Production-only. Nothing else is touched. Never `env rm`.
-      const result = await run(bin, ['env', 'add', name, 'production', '--force'], value, {
-        cwd,
-        env,
-        secrets: secrets(),
-      });
-      if (result.code !== 0) throw new Error(reasonLine(result));
-    },
+    // No `--force`: if the variable exists after all, the CLI/API refuses instead of overwriting.
+    createVariable: (name, value) => write(value, ['env', 'add', name, 'production']),
+    // `--force` overwrites the Production record; the caller has proven it is a lone Production-only
+    // record in a project without custom environments. Nothing else is touched. Never `env rm`.
+    updateVariable: (name, value) =>
+      write(value, ['env', 'add', name, 'production', '--force']),
   };
 }
 
@@ -522,13 +676,16 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     : { ...baseEnv };
   const runner = options.makeRunner({ secrets, env: childEnv });
 
-  let list: ListResult;
+  let list: ProjectState;
   if (options.offline) list = { ok: false, reason: '--offline' };
   else if (!identityResult.ok) list = { ok: false, reason: 'project identity unresolved' };
-  else list = await runner.listRecords();
+  else list = await readProjectState(runner);
 
   if (list.ok)
-    log(`Existing variables read: ${list.records.length} record(s) (only allowlisted names are compared).`);
+    log(
+      `Existing variables read: ${list.records.length} record(s) (only allowlisted names are compared); ` +
+        `custom environments: ${list.customEnvironments}.`,
+    );
   else {
     log(`Existing variables could not be verified (${list.reason}): operations show as "upsert".`);
     if (identityResult.ok || options.offline)
@@ -581,10 +738,31 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     return { applied: [], skipped, blocked, problems, modified: false };
   }
 
+  // Time of check vs time of use: the operator may have taken a while to answer. Read the metadata
+  // again and write only if it still supports exactly the plan that was shown and confirmed.
+  const fresh = await readProjectState(runner);
+  if (!fresh.ok)
+    throw new Error(`Cannot re-verify existing variables (${fresh.reason}); nothing was written`);
+  const freshPlan = buildPlan(local, fresh, names);
+  const signature = (items: readonly PlanItem[]) =>
+    JSON.stringify(items.map((item) => [item.name, item.operation]));
+  const todoNames = todo.map((item) => item.name);
+  if (
+    signature(freshPlan) !== signature(plan) ||
+    stateFingerprint(todoNames, fresh) !== stateFingerprint(todoNames, list)
+  )
+    throw new Error(
+      'Existing variables or custom environments changed after the plan was shown; nothing was written. Re-run to review the new plan',
+    );
+
   const applied: string[] = [];
   for (const item of todo) {
     try {
-      await runner.setVariable(item.name, local[item.name]);
+      // `create` never overwrites (no --force); only a confirmed Production-only `update` does.
+      if (item.operation === 'create') await runner.createVariable(item.name, local[item.name]);
+      else if (item.operation === 'update')
+        await runner.updateVariable(item.name, local[item.name]);
+      else throw new Error(`refusing to write a variable planned as "${item.operation}"`);
       applied.push(item.name);
       log(`  ok     ${item.name}`);
     } catch (error) {

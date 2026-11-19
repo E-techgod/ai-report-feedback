@@ -23,14 +23,24 @@ export const IDS = { projectId: 'prj_test123', orgId: 'team_test456' };
 /**
  * A fake `vercel` that records every invocation (argv, stdin and the project identity it was given)
  * and can be told to misbehave. FAKE_RECORDS is a JSON array of env records; FAKE_EXISTING is a
- * comma list of Production-only variables.
+ * comma list of Production-only variables. Like the real CLI, `env ls --format json` emits only
+ * { envs } (no custom-environment membership, no hidden count, no pagination). Knobs:
+ *   FAKE_LS_SEQ      JSON array of record arrays; the Nth `env ls` call returns entry N (last repeats)
+ *   FAKE_HIDDEN      comma list of variables that exist but are not shown by `env ls`
+ *   FAKE_LS_EXTRA    JSON object merged into the `env ls` document (hiddenProductionEnvCount, pagination)
+ *   FAKE_CUSTOM_ENVS JSON array returned as `environments` by the custom-environments API call
+ *   FAKE_API_FAIL / FAKE_API_RAW   make the custom-environments call fail / print raw text
+ * `env add` without --force refuses an existing variable (listed or hidden), like the real CLI/API.
  */
 function fakeVercel(dir) {
   const bin = path.join(dir, 'fake-vercel.mjs');
   writeFileSync(
     bin,
     `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+// Knobs a test can change while a run is in progress (e.g. between the plan and the apply).
+if (existsSync(process.env.FAKE_LOG + '.control'))
+  Object.assign(process.env, JSON.parse(readFileSync(process.env.FAKE_LOG + '.control', 'utf8')));
 const argv = process.argv.slice(2);
 let stdin = '';
 if (!process.stdin.isTTY) for await (const chunk of process.stdin) stdin += chunk;
@@ -48,23 +58,62 @@ if (argv[0] === 'env' && argv[1] === 'ls') {
     console.log(process.env.FAKE_LS_RAW);
     process.exit(0);
   }
-  const records = process.env.FAKE_RECORDS
+  console.log(
+    JSON.stringify(
+      {
+        envs: currentRecords().map((r) => ({ type: 'encrypted', value: 'ENCRYPTED-BLOB-do-not-print', ...r })),
+        ...JSON.parse(process.env.FAKE_LS_EXTRA ?? '{}'),
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
+}
+if (argv[0] === 'api') {
+  if (process.env.FAKE_API_FAIL) {
+    console.error('Error: api request failed');
+    process.exit(1);
+  }
+  if (process.env.FAKE_API_RAW !== undefined) {
+    console.log(process.env.FAKE_API_RAW);
+    process.exit(0);
+  }
+  console.log(JSON.stringify({ environments: JSON.parse(process.env.FAKE_CUSTOM_ENVS ?? '[]') }));
+  process.exit(0);
+}
+if (argv[0] === 'env' && argv[1] === 'add') {
+  if (process.env.FAKE_FAIL_ON === argv[2]) {
+    console.error('Vercel CLI 50.0.0');
+    console.error('Error: rejected ' + (process.env.FAKE_LEAK ? stdin : ''));
+    process.exit(1);
+  }
+  const hidden = (process.env.FAKE_HIDDEN ?? '').split(',').filter(Boolean);
+  const exists = hidden.includes(argv[2]) || currentRecords().some((r) => r.key === argv[2]);
+  if (exists && !argv.includes('--force')) {
+    console.error('Error: A variable with the name ' + argv[2] + ' already exists');
+    process.exit(1);
+  }
+}
+process.exit(0);
+
+function currentRecords() {
+  if (process.env.FAKE_LS_SEQ) {
+    const seq = JSON.parse(process.env.FAKE_LS_SEQ);
+    const calls = readFileSync(process.env.FAKE_LOG, 'utf8')
+      .split('\\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).argv)
+      .filter((a) => a[0] === 'env' && a[1] === 'ls').length;
+    return seq[Math.min(calls - 1, seq.length - 1)];
+  }
+  return process.env.FAKE_RECORDS
     ? JSON.parse(process.env.FAKE_RECORDS)
     : (process.env.FAKE_EXISTING ?? '')
         .split(',')
         .filter(Boolean)
         .map((key) => ({ key, target: ['production'] }));
-  console.log(
-    JSON.stringify({ envs: records.map((r) => ({ type: 'encrypted', value: 'ENCRYPTED-BLOB-do-not-print', ...r })) }, null, 2),
-  );
-  process.exit(0);
 }
-if (argv[0] === 'env' && argv[1] === 'add' && process.env.FAKE_FAIL_ON === argv[2]) {
-  console.error('Vercel CLI 50.0.0');
-  console.error('Error: rejected ' + (process.env.FAKE_LEAK ? stdin : ''));
-  process.exit(1);
-}
-process.exit(0);
 `,
   );
   chmodSync(bin, 0o755);
@@ -113,13 +162,16 @@ export function baseEnv(ws, extra = {}) {
   return env;
 }
 
+/** Changes fake-vercel knobs for every call made from now on. */
+export const setKnobs = (ws, knobs) => writeFileSync(ws.log + '.control', JSON.stringify(knobs));
+
 export const calls = (ws) =>
   readFileSync(ws.log, 'utf8')
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line));
 
-export const addCalls = (ws) => calls(ws).filter((c) => c.argv[1] === 'add');
+export const addCalls = (ws) => calls(ws).filter((c) => c.argv[0] === 'env' && c.argv[1] === 'add');
 export const verbs = (ws) => calls(ws).map((c) => `${c.argv[0]} ${c.argv[1]}`);
 
 export function assertNoSecrets(assert, text, label = 'output') {

@@ -173,8 +173,7 @@ test('apply with the right project and phrase writes through the CLI with the ex
       'env',
       'add',
       name,
-      'production',
-      '--force',
+      'production', // a create never carries --force
     ]),
   );
   assertNoSecrets(assert, r.out.join('\n') + r.term.printed() + r.err.join('\n'));
