@@ -30,17 +30,40 @@ const sign = (report: FinalReport, expiresAt: number, secret: string) =>
     .update(`download:v1.${reportHash(report)}.${expiresAt}`)
     .digest('hex');
 
+/**
+ * `startedAt` is when the window opens (default: `now`). A repeated submission passes the ORIGINAL
+ * submission's time so that retrying can never push the deadline further out.
+ */
 export function issueDownloadGrant(
   report: FinalReport,
   secret: string,
   now: Date = new Date(),
+  startedAt: Date | number = now,
 ): DownloadGrant {
-  const expiresAt = now.getTime() + DOWNLOAD_WINDOW_MS;
+  const start = typeof startedAt === 'number' ? startedAt : startedAt.getTime();
+  const expiresAt = start + DOWNLOAD_WINDOW_MS;
   return {
     token: `${expiresAt}.${sign(report, expiresAt, secret)}`,
     expiresAt,
-    expiresInMs: DOWNLOAD_WINDOW_MS,
+    expiresInMs: Math.max(0, expiresAt - now.getTime()),
   };
+}
+
+/** Epoch ms deadline carried by a token (call only after `verifyDownloadGrant` returned 'ok'). */
+export function grantExpiresAt(token: string): number {
+  return Number(token.split('.')[0]);
+}
+
+/**
+ * Opaque key of the download budget of one submission (all grants issued for the same submission
+ * share it, so repeating the survey cannot multiply downloads). A keyed hash, so the ledger tab in
+ * the spreadsheet holds no email, name or token. The "dl_" prefix stops Sheets reading it as a number.
+ */
+export function downloadLedgerKey(report: FinalReport, secret: string): string {
+  return `dl_${createHmac('sha256', secret)
+    .update(`download-ledger:v1.${report.submissionId}`)
+    .digest('hex')
+    .slice(0, 32)}`;
 }
 
 /**

@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
-import { verifyDownloadGrant } from './download-grant';
+import { downloadLedgerKey, grantExpiresAt, verifyDownloadGrant } from './download-grant';
+import { MAX_DOWNLOADS_PER_SUBMISSION, type DownloadLimiter } from './download-ledger';
 import { finalReportSchema, deepFreeze, type FinalReport } from './final-report';
+import { logSecurityEvent } from './security-log';
 import { NO_STORE } from './services';
 
 // A finalized report is ~10-15 KB of JSON; anything near this is not one.
@@ -25,16 +27,22 @@ export function pdfFilename(firstName: string): string {
  * in the POST body, never in a URL, and the response is not cacheable.
  *   401 invalid/tampered grant or a report that does not match it
  *   410 grant genuinely issued for this report, but past its 5-minute window
+ *   429 this submission already had its MAX_DOWNLOADS_PER_SUBMISSION successful downloads
+ *   503 the download ledger could not be reached (fails closed: see download-ledger.ts)
+ * Only requests that pass verification ever touch the ledger, so unauthorized or expired calls
+ * cost nothing but the signature check.
  */
 export async function handlePdfDownload(
   req: Request,
   {
     secret,
     renderPdf,
+    limiter,
     now,
   }: {
     secret: string;
     renderPdf: (report: FinalReport) => Promise<Buffer>;
+    limiter: DownloadLimiter;
     now?: () => Date;
   },
 ) {
@@ -50,25 +58,51 @@ export async function handlePdfDownload(
   if (!parsed.success) return fail(400, 'Solicitud inválida.');
   const report = deepFreeze(parsed.data);
 
-  const check = verifyDownloadGrant(
-    report,
-    req.headers.get('x-download-token') ?? '',
-    secret,
-    now?.(),
-  );
-  if (check === 'expired') return fail(410, 'Tu sesión de descarga ha expirado.');
-  if (check !== 'ok') return fail(401, 'Descarga no autorizada.');
+  const token = req.headers.get('x-download-token') ?? '';
+  const clock = now?.() ?? new Date();
+  const check = verifyDownloadGrant(report, token, secret, clock);
+  if (check === 'expired') {
+    logSecurityEvent('download_expired');
+    return fail(410, 'Tu sesión de descarga ha expirado.');
+  }
+  if (check !== 'ok') {
+    logSecurityEvent('download_unauthorized', {
+      reason: token ? 'invalid_grant' : 'missing_grant',
+    });
+    return fail(401, 'Descarga no autorizada.');
+  }
 
-  let pdf: Buffer;
+  // Verified: this submission may download up to MAX_DOWNLOADS_PER_SUBMISSION times while the grant lives.
+  const key = downloadLedgerKey(report, secret);
+  const grant = key.slice(3, 11); // opaque, for correlating log lines only
+  let outcome;
   try {
-    pdf = await renderPdf(report);
+    outcome = await limiter.deliver(key, grantExpiresAt(token), clock, () => renderPdf(report));
   } catch (error) {
     // Named log line (no report content) so a runtime packaging/render failure is diagnosable.
+    // A render failure never uses one of the downloads.
     console.error(
       `[pdf] render-failed: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown'}`,
     );
     return fail(500, 'No se pudo generar el PDF.');
   }
+  if (outcome.kind === 'limit') {
+    logSecurityEvent('download_limit_reached', { grant, limit: MAX_DOWNLOADS_PER_SUBMISSION });
+    return fail(
+      429,
+      `Alcanzaste el límite de ${MAX_DOWNLOADS_PER_SUBMISSION} descargas de este informe.`,
+    );
+  }
+  if (outcome.kind === 'unavailable') {
+    logSecurityEvent('download_limit_unavailable', { grant });
+    return fail(503, 'No pudimos verificar tu descarga en este momento. Intenta nuevamente.');
+  }
+  logSecurityEvent('download_served', {
+    grant,
+    ordinal: outcome.ordinal,
+    limit: MAX_DOWNLOADS_PER_SUBMISSION,
+  });
+  const pdf = outcome.value;
   return new NextResponse(new Uint8Array(pdf), {
     status: 200,
     headers: {

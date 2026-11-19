@@ -1,4 +1,5 @@
 import { google } from 'googleapis';
+import type { LedgerGateway } from './download-ledger';
 import { columnLetter } from './sheet-schema';
 import { SHEET_TAB, type SheetCell, type SheetsGateway } from './sheets';
 
@@ -10,7 +11,7 @@ export function normalizePrivateKey(raw: string): string {
   return raw.trim().replace(/^"|"$/g, '').replace(/\\n/g, '\n');
 }
 
-export function createGoogleSheetsGateway(): SheetsGateway | null {
+function googleSheetsClient() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
   const privateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -21,7 +22,105 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
     key: normalizePrivateKey(privateKey),
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
-  const sheets = google.sheets({ version: 'v4', auth });
+  return { spreadsheetId, sheets: google.sheets({ version: 'v4', auth }) };
+}
+
+/**
+ * Row number of an append, from the A1 range Google reports, e.g. `'Control de descargas'!A42:B42`
+ * (or `Sheet1!A7` for a single cell). 0 when the range cannot be understood.
+ */
+export function appendedRowNumber(range: string | null | undefined): number {
+  const match = /!\$?[A-Z]+\$?(\d+)(?::\$?[A-Z]+\$?(\d+))?$/.exec(range ?? '');
+  return match ? Number(match[2] ?? match[1]) : 0;
+}
+
+/** Name of the ledger tab that counts delivered PDF downloads (see download-ledger.ts). */
+export const LEDGER_TAB = 'Control de descargas';
+const ledgerTab = `'${LEDGER_TAB}'`;
+
+/**
+ * Google implementation of the download ledger. The tab is created on first use if it does not
+ * exist (idempotent); it holds only a UTC timestamp and an opaque keyed hash per delivered PDF.
+ */
+export function createGoogleLedgerGateway(): LedgerGateway | null {
+  const client = googleSheetsClient();
+  if (!client) return null;
+  const { spreadsheetId, sheets } = client;
+  const options = { timeout: REQUEST_TIMEOUT_MS };
+
+  const titleExists = async () => {
+    const { data } = await sheets.spreadsheets.get(
+      { spreadsheetId, fields: 'sheets.properties.title' },
+      options,
+    );
+    return (data.sheets ?? []).some((sheet) => sheet.properties?.title === LEDGER_TAB);
+  };
+
+  let ready: Promise<void> | undefined;
+  const ensureTab = () => {
+    ready ??= (async () => {
+      if (await titleExists()) return;
+      try {
+        await sheets.spreadsheets.batchUpdate(
+          {
+            spreadsheetId,
+            requestBody: { requests: [{ addSheet: { properties: { title: LEDGER_TAB } } }] },
+          },
+          options,
+        );
+        await sheets.spreadsheets.values.update(
+          {
+            spreadsheetId,
+            range: `${ledgerTab}!A1:B1`,
+            valueInputOption: 'RAW',
+            requestBody: { values: [['Fecha (UTC)', 'Concesión de descarga']] },
+          },
+          options,
+        );
+      } catch (error) {
+        // Another instance may have created it a moment ago: that is fine.
+        if (!(await titleExists())) throw error;
+      }
+    })().catch((error) => {
+      ready = undefined; // retry on the next request
+      throw error;
+    });
+    return ready;
+  };
+
+  return {
+    async append(row) {
+      await ensureTab();
+      const { data } = await sheets.spreadsheets.values.append(
+        {
+          spreadsheetId,
+          range: `${ledgerTab}!A:B`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: [row] },
+        },
+        options,
+      );
+      // e.g. 'Control de descargas'!A42:B42 -> 42
+      const rowNumber = appendedRowNumber(data.updates?.updatedRange);
+      if (!rowNumber) throw new Error('Download ledger did not report the appended row');
+      return rowNumber;
+    },
+
+    async readKeys(upToRow) {
+      const { data } = await sheets.spreadsheets.values.get(
+        { spreadsheetId, range: `${ledgerTab}!B1:B${upToRow}` },
+        options,
+      );
+      return (data.values ?? []).map((row) => String(row[0] ?? ''));
+    },
+  };
+}
+
+export function createGoogleSheetsGateway(): SheetsGateway | null {
+  const client = googleSheetsClient();
+  if (!client) return null;
+  const { spreadsheetId, sheets } = client;
   const options = { timeout: REQUEST_TIMEOUT_MS };
   const timed = (timeoutMs?: number) => ({
     timeout: Math.min(REQUEST_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs ?? REQUEST_TIMEOUT_MS))),

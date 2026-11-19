@@ -23,12 +23,14 @@ The UI submits to `POST /api/questionnaire`, which appends one row to the existi
 3. Set `GOOGLE_SHEET_ID`, `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY` (server-only; see `.env.example`).
 4. Success is returned only after Google confirms exactly one 24-cell row was written.
 
-Duplicate protection (no schema change): the client keeps one submission id per diagnosis; the server ignores a repeated id, merges concurrent identical requests, and skips the append if the same email already has identical answers within the last 10 minutes.
+Duplicate protection (no schema change): the client keeps one submission id per diagnosis; the server ignores a repeated id, merges concurrent identical requests, and skips the append if the same email already has identical answers within the last 10 minutes. A duplicate never calls the AI again and never opens a new download window.
+
+Abuse protection (details and trade-offs in `docs/pdf-download.md`): at most **5 submissions per email per rolling 24 hours** (HTTP 429 before any AI call), at most **5 successful PDF downloads per submission** within the 5-minute window (counted in an append-only `Control de descargas` tab of the same spreadsheet, created automatically), privacy-safe structured security logs, and a per-IP Vercel Firewall rule that must be created in the dashboard.
 
 **Limitations**
 
 - Rows added through the Sheets API do **not** fire Google Form submit triggers. If the existing Apps Script email workflow uses an `onFormSubmit` trigger, it will not run for these rows (see report / add an `onChange` or time-based trigger separately).
-- The in-memory id/rate-limit guards are per server instance; the sheet check covers cross-instance duplicates.
+- The in-memory id guard, download queue and report cache are per server instance and only save work; the Sheet is what enforces duplicates and both limits across instances. Google Sheets has no transactions, so concurrent requests are ranked by append order afterwards (see `docs/pdf-download.md`). Do not sort or re-order the response tab: the email limit depends on row order.
 - `scripts/google-apps-script.gs` and `/api/submit` are the legacy webhook bridge and are no longer used by the UI.
 
 ## Report, AI and PDF
@@ -106,5 +108,5 @@ Set `NEXT_PUBLIC_BOOKING_URL` to the real, published Google Appointment Schedule
 - Must validate privacy/consent language and suitability of questions before a public blast.
 - No scoring adjustments for nonapplicable questions. All twenty must be answered. Confirm this business rule before launch.
 - Questionnaire responses live only in the header-mapped Google Sheet. Reports and PDFs are not stored anywhere: the browser holds the report in memory and the PDF is rendered only for a request carrying a valid, unexpired, report-specific grant; there are no public links.
-- Rate limiting / CAPTCHA (the database-backed limits were removed with Neon: use the Vercel Firewall rule in `docs/pdf-download.md`), spam monitoring, credential rotation, retention policies, authorized staff access, and legal review are needed before a high-volume campaign.
+- Rate limiting: per-email (5 per 24 h) and per-submission download (5) limits are enforced in code against the Sheet; the **per-IP Firewall rule is not created yet** (verified absent on 2026-11-19; set it up with the steps in `docs/pdf-download.md`). CAPTCHA/BotID, alerting on the security logs, credential rotation, retention policies, authorized staff access, and legal review are still needed before a high-volume campaign. The limits are per email address, not per person: aliases and throw-away addresses are not detected.
 - Ensure Vercel plan permits commercial usage. Secrets must never be in `NEXT_PUBLIC_` vars or committed.

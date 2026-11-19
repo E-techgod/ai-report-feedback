@@ -5,14 +5,18 @@ import { handlePdfDownload } from '../src/lib/report-pdf-handler.ts';
 import { renderReportPdf } from '../src/lib/pdf/ReportPdf.tsx';
 import { sampleReport } from './helpers/fixtures.mjs';
 import { T0 } from './helpers/flow-harness.mjs';
+import { freshLimiter } from './helpers/ledger.mjs';
 
 const SECRET = 's'.repeat(32);
 const at = (ms) => () => new Date(T0 + ms);
 
 function setup() {
   const rendered = [];
+  const { limiter, gateway } = freshLimiter();
   return {
     rendered,
+    limiter,
+    ledger: gateway,
     renderPdf: async (report) => {
       rendered.push(report);
       return Buffer.from('%PDF-fake');
@@ -34,6 +38,7 @@ const download = (s, report, token, offsetMs = 1_000, extra) =>
   handlePdfDownload(post(report, token, extra), {
     secret: SECRET,
     renderPdf: s.renderPdf,
+    limiter: s.limiter,
     now: at(offsetMs),
   });
 
@@ -132,6 +137,7 @@ test('a failed render is logged by name, returns a no-store 500 and leaks no rep
   try {
     response = await handlePdfDownload(post(report, token), {
       secret: SECRET,
+      limiter: freshLimiter().limiter,
       now: at(1_000),
       renderPdf: async () => {
         throw new Error("Cannot find module 'pdfkit/js/standard-fonts/Helvetica.cjs'");
@@ -153,6 +159,7 @@ test('the real renderer produces a PDF from a report that went through JSON', as
   const response = await handlePdfDownload(post(received, token), {
     secret: SECRET,
     renderPdf: renderReportPdf,
+    limiter: freshLimiter().limiter,
     now: at(1_000),
   });
   assert.equal(response.status, 200);
