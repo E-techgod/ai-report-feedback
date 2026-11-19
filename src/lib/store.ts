@@ -1,0 +1,270 @@
+import { parseFinalReport, reportHash, type FinalReport } from './final-report';
+
+/**
+ * Persistence for finalized reports and email delivery state (Postgres / Neon).
+ * All SQL goes through `SqlExecutor`, so the same code runs against Neon in production and an
+ * in-process Postgres (PGlite) in tests. Questionnaire responses are NOT stored here.
+ */
+export type SqlExecutor = (
+  text: string,
+  params?: unknown[],
+) => Promise<Array<Record<string, unknown>>>;
+
+export type EmailStatus =
+  | 'disabled'
+  | 'pending'
+  | 'sending'
+  | 'accepted'
+  | 'delivered'
+  | 'failed'
+  | 'failed_final'
+  | 'bounced'
+  | 'complained';
+
+export type ReportRecord = {
+  id: string;
+  submissionId: string;
+  email: string;
+  fingerprint: string;
+  report: FinalReport;
+  createdAt: Date;
+  emailStatus: EmailStatus;
+  emailAttempts: number;
+  emailLastAttemptAt: Date | null;
+  emailNextAttemptAt: Date | null;
+  emailLeaseUntil: Date | null;
+  emailProviderMessageId: string | null;
+  emailAcceptedAt: Date | null;
+  emailDeliveredAt: Date | null;
+  emailLastError: string | null;
+};
+
+export type ProviderEvent = 'delivered' | 'bounced' | 'complained' | 'delayed';
+
+export type ClaimOptions = { maxAttempts: number; leaseMs: number; maxAgeMs: number };
+
+const d = (v: unknown): Date | null => (v == null ? null : new Date(v as string | number | Date));
+
+function toRecord(row: Record<string, unknown>): ReportRecord {
+  const report = parseFinalReport(
+    typeof row.report === 'string' ? JSON.parse(row.report) : row.report,
+  );
+  if (reportHash(report) !== row.content_hash)
+    throw new Error('Stored report failed its integrity check');
+  return {
+    id: String(row.id),
+    submissionId: String(row.submission_id),
+    email: String(row.email),
+    fingerprint: String(row.fingerprint),
+    report,
+    createdAt: d(row.created_at)!,
+    emailStatus: row.email_status as EmailStatus,
+    emailAttempts: Number(row.email_attempts),
+    emailLastAttemptAt: d(row.email_last_attempt_at),
+    emailNextAttemptAt: d(row.email_next_attempt_at),
+    emailLeaseUntil: d(row.email_lease_until),
+    emailProviderMessageId: (row.email_provider_message_id as string | null) ?? null,
+    emailAcceptedAt: d(row.email_accepted_at),
+    emailDeliveredAt: d(row.email_delivered_at),
+    emailLastError: (row.email_last_error as string | null) ?? null,
+  };
+}
+
+/** Short, content-free error text safe to store and log. */
+export function safeError(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.replace(/\s+/g, ' ').slice(0, 200);
+}
+
+export function createStore(sql: SqlExecutor) {
+  async function one(text: string, params: unknown[]): Promise<ReportRecord | null> {
+    const rows = await sql(text, params);
+    return rows[0] ? toRecord(rows[0]) : null;
+  }
+
+  async function event(reportId: string, at: Date, name: string, detail?: string) {
+    await sql(
+      'insert into report_email_events (report_id, at, event, detail) values ($1, $2, $3, $4)',
+      [reportId, at.toISOString(), name, detail ?? null],
+    );
+  }
+
+  return {
+    /** Inserts the finalized report once per submission id. `created` is false on a retry. */
+    async insertReport(input: {
+      report: FinalReport;
+      email: string;
+      fingerprint: string;
+      emailStatus: 'pending' | 'disabled';
+      now: Date;
+    }): Promise<{ record: ReportRecord; created: boolean }> {
+      const { report } = input;
+      const inserted = await sql(
+        `insert into reports (id, submission_id, fingerprint, email, report, content_hash,
+           narrative_source, ai_failure_reason, created_at, email_status, email_updated_at)
+         values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $9)
+         on conflict (submission_id) do nothing
+         returning *`,
+        [
+          report.reportId,
+          report.submissionId,
+          input.fingerprint,
+          input.email,
+          JSON.stringify(report),
+          reportHash(report),
+          report.narrativeSource,
+          report.aiFailureReason,
+          input.now.toISOString(),
+          input.emailStatus,
+        ],
+      );
+      if (inserted[0]) return { record: toRecord(inserted[0]), created: true };
+      const existing = await one('select * from reports where submission_id = $1', [
+        report.submissionId,
+      ]);
+      if (!existing) throw new Error('Report insert conflict without an existing row');
+      return { record: existing, created: false };
+    },
+
+    getById: (id: string) => one('select * from reports where id = $1', [id]),
+
+    getBySubmissionId: (submissionId: string) =>
+      one('select * from reports where submission_id = $1', [submissionId]),
+
+    /** Same person + same answers recently, even under a different client-side submission id. */
+    findRecentByFingerprint: (fingerprint: string, since: Date) =>
+      one(
+        'select * from reports where fingerprint = $1 and created_at >= $2 order by created_at desc limit 1',
+        [fingerprint, since.toISOString()],
+      ),
+
+    /**
+     * Atomically claims the right to send. Only one caller can win per attempt: the UPDATE only
+     * matches a row that is pending/failed and due, or whose previous 'sending' lease expired.
+     */
+    async claimEmail(id: string, now: Date, opts: ClaimOptions): Promise<ReportRecord | null> {
+      const claimed = await one(
+        `update reports set
+           email_status = 'sending',
+           email_attempts = email_attempts + 1,
+           email_last_attempt_at = $2,
+           email_lease_until = $3,
+           email_updated_at = $2
+         where id = $1
+           and email_attempts < $4
+           and created_at >= $5
+           and (
+             (email_status in ('pending', 'failed') and (email_next_attempt_at is null or email_next_attempt_at <= $2))
+             or (email_status = 'sending' and email_lease_until < $2)
+           )
+         returning *`,
+        [
+          id,
+          now.toISOString(),
+          new Date(now.getTime() + opts.leaseMs).toISOString(),
+          opts.maxAttempts,
+          new Date(now.getTime() - opts.maxAgeMs).toISOString(),
+        ],
+      );
+      if (claimed) await event(id, now, 'attempt', `attempt ${claimed.emailAttempts}`);
+      return claimed;
+    },
+
+    async markAccepted(id: string, messageId: string | null, now: Date) {
+      await sql(
+        `update reports set email_status = 'accepted', email_provider_message_id = $2,
+           email_accepted_at = $3, email_lease_until = null, email_next_attempt_at = null,
+           email_last_error = null, email_updated_at = $3
+         where id = $1 and email_status = 'sending'`,
+        [id, messageId, now.toISOString()],
+      );
+      await event(id, now, 'accepted', messageId ?? undefined);
+    },
+
+    async markFailed(id: string, error: string, nextAttemptAt: Date | null, now: Date) {
+      await sql(
+        `update reports set email_status = $2, email_next_attempt_at = $3, email_lease_until = null,
+           email_last_error = $4, email_updated_at = $5
+         where id = $1 and email_status = 'sending'`,
+        [
+          id,
+          nextAttemptAt ? 'failed' : 'failed_final',
+          nextAttemptAt?.toISOString() ?? null,
+          error,
+          now.toISOString(),
+        ],
+      );
+      await event(id, now, nextAttemptAt ? 'failed' : 'failed_final', error);
+    },
+
+    /**
+     * Applies a provider webhook event. Precedence: bounced/complained are never overwritten by
+     * 'delivered'; 'delivered' is only applied to an accepted message.
+     * Returns false when no report has that provider message id (the webhook should be retried).
+     */
+    async applyProviderEvent(messageId: string, name: ProviderEvent, at: Date): Promise<boolean> {
+      const rows = await sql(
+        'select id, email_status from reports where email_provider_message_id = $1',
+        [messageId],
+      );
+      const row = rows[0];
+      if (!row) return false;
+      const id = String(row.id);
+      const status = row.email_status as EmailStatus;
+      if (name === 'delivered' && (status === 'accepted' || status === 'sending')) {
+        await sql(
+          `update reports set email_status = 'delivered', email_delivered_at = $2, email_updated_at = $2 where id = $1`,
+          [id, at.toISOString()],
+        );
+      } else if ((name === 'bounced' || name === 'complained') && status !== 'complained') {
+        await sql(
+          `update reports set email_status = $2, email_last_error = $3, email_updated_at = $4 where id = $1`,
+          [id, name, `provider:${name}`, at.toISOString()],
+        );
+      }
+      await event(id, at, `provider:${name}`);
+      return true;
+    },
+
+    /** Reports whose email still needs work: never sent, failed and due, or a stuck 'sending'. */
+    async listDueForEmail(now: Date, limit: number, opts: ClaimOptions): Promise<string[]> {
+      const rows = await sql(
+        `select id from reports
+         where email_attempts < $2 and created_at >= $3
+           and (
+             (email_status in ('pending', 'failed') and (email_next_attempt_at is null or email_next_attempt_at <= $1))
+             or (email_status = 'sending' and email_lease_until < $1)
+           )
+         order by created_at asc limit $4`,
+        [
+          now.toISOString(),
+          opts.maxAttempts,
+          new Date(now.getTime() - opts.maxAgeMs).toISOString(),
+          limit,
+        ],
+      );
+      return rows.map((r) => String(r.id));
+    },
+
+    /** Fixed-window counter shared across serverless instances. Returns the count in the window. */
+    async hit(key: string, windowSeconds: number, now: Date): Promise<number> {
+      const rows = await sql(
+        `insert into rate_limits (key, window_start, count) values ($1, $2, 1)
+         on conflict (key) do update set
+           window_start = case when rate_limits.window_start <= $2::timestamptz - make_interval(secs => $3::int)
+                               then $2::timestamptz else rate_limits.window_start end,
+           count = case when rate_limits.window_start <= $2::timestamptz - make_interval(secs => $3::int)
+                        then 1 else rate_limits.count + 1 end
+         returning count`,
+        [key, now.toISOString(), windowSeconds],
+      );
+      return Number(rows[0]?.count ?? 0);
+    },
+
+    async purgeRateLimits(olderThan: Date) {
+      await sql('delete from rate_limits where window_start < $1', [olderThan.toISOString()]);
+    },
+  };
+}
+
+export type ReportStore = ReturnType<typeof createStore>;
