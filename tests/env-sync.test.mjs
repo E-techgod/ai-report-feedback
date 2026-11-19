@@ -94,7 +94,7 @@ test('new local names are proposals only; protected and existing names are exclu
   };
   const state = {
     ok: true,
-    records: [{ key: 'ALREADY_REMOTE' }],
+    records: [rec('ALREADY_REMOTE', ['production'])],
     customEnvironments: 0,
   };
   assert.equal(isNewVariableCandidate('NEW_SERVICE_TOKEN'), true);
@@ -124,9 +124,38 @@ test('Preview classification updates only a lone Preview record', () => {
   assert.deepEqual(classifyVariable('X', preview, 0, 'preview'), { kind: 'update' });
   assert.equal(classifyVariable('X', preview, 0, 'production').kind, 'blocked');
   assert.equal(
+    classifyVariable('X', [rec('X', ['production'])], 0, 'preview').kind,
+    'propose-preview',
+  );
+  assert.equal(classifyVariable('X', [rec('X', ['production'])], 1, 'preview').kind, 'blocked');
+  assert.equal(
     classifyVariable('X', [{ ...preview[0], targets: ['preview', 'production'] }], 0, 'preview')
       .kind,
     'blocked',
+  );
+  assert.equal(
+    classifyVariable('X', [rec('X', ['production']), rec('X', ['preview'])], 0, 'preview').kind,
+    'blocked',
+  );
+});
+
+test('Preview plan proposes a separate entry for an allowlisted Production-only name', () => {
+  const state = stateOf([{ key: 'ANTHROPIC_API_KEY', target: ['production'] }]);
+  const item = buildPlan(
+    { ANTHROPIC_API_KEY: SECRET_A },
+    state,
+    ['ANTHROPIC_API_KEY'],
+    'preview',
+  )[0];
+  assert.equal(item.operation, 'propose-preview');
+  assert.equal(
+    buildNewVariablePlan(
+      { ANTHROPIC_API_KEY: SECRET_A },
+      state,
+      ['ANTHROPIC_API_KEY'],
+      'preview',
+    )[0].operation,
+    'create',
   );
 });
 
