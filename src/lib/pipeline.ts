@@ -200,13 +200,17 @@ export async function deliverReportEmail(
   let messageId: string | null;
   try {
     const pdf = await deps.renderPdf(claimed.report);
-    const message = buildEmail(claimed.report, { siteUrl: config.siteUrl });
+    const filename = pdfFilename(claimed.report.firstName);
+    const message = buildEmail(claimed.report, {
+      siteUrl: config.siteUrl,
+      attachmentName: filename,
+    });
     ({ messageId } = await mailer.send({
       to: claimed.email,
       subject: message.subject,
       html: message.html,
       text: message.text,
-      attachments: [{ filename: pdfFilename(claimed.report.firstName), content: pdf }],
+      attachments: [{ filename, content: pdf }],
       idempotencyKey: `report-email/${claimed.id}`,
     }));
   } catch (error) {

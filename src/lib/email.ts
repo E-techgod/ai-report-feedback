@@ -40,15 +40,49 @@ export function pdfFilename(firstName: string): string {
   return `Diagnostico-Patrimonial-Quiron${slug ? `-${slug}` : ''}.pdf`;
 }
 
-export function buildEmail(report: FinalReport, opts: { siteUrl?: string | null } = {}) {
+/**
+ * The three "most important" lines of the email. Everything comes from the stored report's top
+ * priority (the same finding / area / action the web view and the PDF show), never from new text.
+ */
+export function emailHighlights(c: ReturnType<typeof buildReportContent>) {
+  const top = c.priorities.items[0];
+  if (top) {
+    return [
+      { label: 'Tu principal hallazgo:', value: top.finding },
+      { label: 'Área prioritaria:', value: top.title },
+      { label: 'Siguiente paso:', value: top.action },
+    ];
+  }
+  // No weak areas: the report's own "nothing to strengthen" message is the finding.
+  return c.priorities.empty
+    ? [
+        { label: 'Tu principal hallazgo:', value: c.priorities.empty.title },
+        { label: 'Siguiente paso:', value: c.priorities.empty.text },
+      ]
+    : [];
+}
+
+export function buildEmail(
+  report: FinalReport,
+  opts: { siteUrl?: string | null; attachmentName?: string } = {},
+) {
   const c = buildReportContent(report);
   const name = report.firstName || 'cliente';
   const subject = `${name}, tu diagnóstico patrimonial de Quirón`;
   const { score } = c.hero;
+  const highlights = emailHighlights(c);
+  const attachmentName = opts.attachmentName ?? pdfFilename(report.firstName);
+  const bookingLabel = 'Agenda una asesoría con Quirón';
   const logo = opts.siteUrl ? `${opts.siteUrl.replace(/\/$/, '')}/images/quiron-logo.png` : null;
   const button = c.cta.url
-    ? `<a href="${esc(c.cta.url)}" style="display:inline-block;background:#be925a;color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 22px;border-radius:6px;font-size:15px">${esc(c.cta.buttonLabel)}</a>`
+    ? `<a href="${esc(c.cta.url)}" style="display:inline-block;background:#be925a;color:#ffffff;text-decoration:none;font-weight:bold;padding:13px 26px;border-radius:6px;font-size:15px">${bookingLabel}</a>`
     : `<p style="margin:0;color:#dfe9e2;font-size:13px">${esc(c.cta.unavailableNote)}</p>`;
+  const highlightRows = highlights
+    .map(
+      (h) =>
+        `<p style="margin:0 0 10px;font-size:15px;line-height:1.55"><strong style="color:#143b2c">${esc(h.label)}</strong> ${esc(h.value)}</p>`,
+    )
+    .join('\n');
 
   const html = `<!doctype html>
 <html lang="es"><body style="margin:0;padding:0;background:#f4f3ee;font-family:Arial,Helvetica,sans-serif;color:#162a20">
@@ -60,9 +94,10 @@ export function buildEmail(report: FinalReport, opts: { siteUrl?: string | null 
       : `<strong style="letter-spacing:2px;color:#ffffff;font-size:18px">QUIRÓN</strong>`
   }</td></tr>
 <tr><td style="padding:28px 32px 8px">
-<p style="margin:0 0 6px;font-size:12px;letter-spacing:1.5px;color:#be925a;text-transform:uppercase">${esc(c.brand)}</p>
-<h1 style="margin:0 0 12px;font-size:24px;line-height:1.2;color:#143b2c">Hola, ${esc(name)}. Tu diagnóstico está listo.</h1>
-<p style="margin:0;font-size:15px;line-height:1.6;color:#63756a">Adjuntamos el informe completo en PDF. Aquí tienes un resumen.</p>
+<h1 style="margin:0 0 16px;font-size:24px;line-height:1.2;color:#143b2c">Tu diagnóstico patrimonial está listo</h1>
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6">Hola, ${esc(name)}:</p>
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6">Gracias por completar el cuestionario de Blindaje Patrimonial de Quirón.</p>
+<p style="margin:0;font-size:15px;line-height:1.6;color:#63756a">Hemos preparado tu diagnóstico personalizado. Aquí tienes un resumen de los resultados más importantes.</p>
 </td></tr>
 <tr><td style="padding:16px 32px">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f3ee;border-radius:8px"><tr><td style="padding:18px 20px">
@@ -71,29 +106,38 @@ export function buildEmail(report: FinalReport, opts: { siteUrl?: string | null 
 <div style="font-size:14px;font-weight:bold;color:#9a6626">${esc(score.levelLabel)}</div>
 </td></tr></table></td></tr>
 <tr><td style="padding:8px 32px 8px">
-<h2 style="margin:0 0 8px;font-size:16px;color:#143b2c">${esc(c.executive.title)}</h2>
-<p style="margin:0;font-size:15px;line-height:1.65">${esc(c.executive.summaryText)}</p>
+<h2 style="margin:0 0 12px;font-size:17px;color:#143b2c">Lo más importante de tu diagnóstico</h2>
+${highlightRows}
 </td></tr>
-<tr><td style="padding:20px 32px 28px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#143b2c;border-radius:8px"><tr><td style="padding:22px 24px">
-<h2 style="margin:0 0 6px;font-size:17px;color:#ffffff">${esc(c.cta.title)}</h2>
-<p style="margin:0 0 14px;font-size:14px;line-height:1.55;color:#dfe9e2">${esc(c.cta.text)}</p>
+<tr><td style="padding:12px 32px 8px">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#143b2c;border-radius:8px"><tr><td style="padding:16px 20px">
+<div style="font-size:15px;font-weight:bold;color:#ffffff">Tu informe completo está adjunto</div>
+<div style="margin-top:4px;font-size:13px;color:#dfe9e2">${esc(attachmentName)}</div>
+</td></tr></table></td></tr>
+<tr><td style="padding:16px 32px 28px">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#000000;border-radius:8px"><tr><td align="center" style="padding:20px 24px">
 ${button}
 </td></tr></table></td></tr>
 <tr><td style="padding:0 32px 28px;font-size:11px;line-height:1.5;color:#63756a">${esc(c.legal)}</td></tr>
 </table></td></tr></table></body></html>`;
 
   const text = [
-    `Hola, ${name}. Tu diagnóstico está listo.`,
+    'Tu diagnóstico patrimonial está listo',
+    '',
+    `Hola, ${name}:`,
+    '',
+    'Gracias por completar el cuestionario de Blindaje Patrimonial de Quirón.',
+    'Hemos preparado tu diagnóstico personalizado. Aquí tienes un resumen de los resultados más importantes.',
     '',
     `${score.label}: ${score.value}`,
     score.levelLabel,
     '',
-    c.executive.title,
-    c.executive.summaryText,
+    'Lo más importante de tu diagnóstico',
+    ...highlights.map((h) => `${h.label} ${h.value}`),
     '',
-    'Adjuntamos el informe completo en PDF.',
-    c.cta.url ? `${c.cta.buttonLabel}: ${c.cta.url}` : c.cta.unavailableNote,
+    `Tu informe completo está adjunto: ${attachmentName}`,
+    '',
+    c.cta.url ? `${bookingLabel}: ${c.cta.url}` : c.cta.unavailableNote,
     '',
     c.legal,
   ].join('\n');
