@@ -28,6 +28,10 @@ export type ReportRecord = {
   fingerprint: string;
   report: FinalReport;
   createdAt: Date;
+  sheetRowNumber: number | null;
+  pdfDownloadedAt: Date | null;
+  trackingVersion: number;
+  sheetSyncedVersion: number;
   emailStatus: EmailStatus;
   emailAttempts: number;
   emailLastAttemptAt: Date | null;
@@ -69,6 +73,10 @@ function toRecord(row: Record<string, unknown>): ReportRecord {
     fingerprint: String(row.fingerprint),
     report,
     createdAt: d(row.created_at)!,
+    sheetRowNumber: row.sheet_row_number == null ? null : Number(row.sheet_row_number),
+    pdfDownloadedAt: d(row.pdf_downloaded_at),
+    trackingVersion: Number(row.tracking_version),
+    sheetSyncedVersion: Number(row.sheet_synced_version),
     emailStatus: row.email_status as EmailStatus,
     emailAttempts: Number(row.email_attempts),
     emailLastAttemptAt: d(row.email_last_attempt_at),
@@ -107,13 +115,15 @@ export function createStore(sql: SqlExecutor) {
       email: string;
       fingerprint: string;
       emailStatus: 'pending' | 'disabled';
+      sheetRowNumber?: number | null;
       now: Date;
     }): Promise<{ record: ReportRecord; created: boolean }> {
       const { report } = input;
       const inserted = await sql(
         `insert into reports (id, submission_id, fingerprint, email, report, content_hash,
-           narrative_source, ai_failure_reason, created_at, email_status, email_updated_at)
-         values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $9)
+           narrative_source, ai_failure_reason, created_at, email_status, email_updated_at,
+           sheet_row_number)
+         values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $9, $11)
          on conflict (submission_id) do nothing
          returning *`,
         [
@@ -127,6 +137,7 @@ export function createStore(sql: SqlExecutor) {
           report.aiFailureReason,
           input.now.toISOString(),
           input.emailStatus,
+          input.sheetRowNumber ?? null,
         ],
       );
       if (inserted[0]) return { record: toRecord(inserted[0]), created: true };
@@ -141,6 +152,48 @@ export function createStore(sql: SqlExecutor) {
 
     getBySubmissionId: (submissionId: string) =>
       one('select * from reports where submission_id = $1', [submissionId]),
+
+    /** Link a pre-existing report to its verified response row, without changing its content. */
+    async linkSheetRow(id: string, rowNumber: number): Promise<ReportRecord> {
+      const record = await one(
+        `update reports set sheet_row_number = $2, tracking_version = tracking_version + 1
+         where id = $1 and sheet_row_number is null returning *`,
+        [id, rowNumber],
+      );
+      if (record) return record;
+      const existing = await one('select * from reports where id = $1', [id]);
+      if (!existing || existing.sheetRowNumber !== rowNumber)
+        throw new Error('Report linked to a different spreadsheet row');
+      return existing;
+    },
+
+    async markPdfDownloaded(id: string, at: Date): Promise<void> {
+      await sql(
+        `update reports set pdf_downloaded_at = $2, tracking_version = tracking_version + 1
+         where id = $1 and pdf_downloaded_at is null`,
+        [id, at.toISOString()],
+      );
+    },
+
+    async markSheetSynced(id: string, version: number): Promise<boolean> {
+      const rows = await sql(
+        `update reports set sheet_synced_version = $2
+         where id = $1 and tracking_version = $2 and sheet_synced_version < $2
+         returning id`,
+        [id, version],
+      );
+      return rows.length > 0;
+    },
+
+    async listUnsynced(limit: number): Promise<string[]> {
+      const rows = await sql(
+        `select id from reports where sheet_row_number is not null
+           and tracking_version > sheet_synced_version
+         order by created_at asc limit $1`,
+        [limit],
+      );
+      return rows.map((row) => String(row.id));
+    },
 
     /** Same person + same answers recently, even under a different client-side submission id. */
     findRecentByFingerprint: (fingerprint: string, since: Date) =>
@@ -160,7 +213,8 @@ export function createStore(sql: SqlExecutor) {
            email_attempts = email_attempts + 1,
            email_last_attempt_at = $2,
            email_lease_until = $3,
-           email_updated_at = $2
+           email_updated_at = $2,
+           tracking_version = tracking_version + 1
          where id = $1
            and email_attempts < $4
            and created_at >= $5
@@ -186,6 +240,7 @@ export function createStore(sql: SqlExecutor) {
         `update reports set email_status = 'accepted', email_provider_message_id = $2,
            email_accepted_at = $3, email_lease_until = null, email_next_attempt_at = null,
            email_last_error = null, email_updated_at = $3
+           , tracking_version = tracking_version + 1
          where id = $1 and email_status = 'sending'`,
         [id, messageId, now.toISOString()],
       );
@@ -195,7 +250,8 @@ export function createStore(sql: SqlExecutor) {
     async markFailed(id: string, error: string, nextAttemptAt: Date | null, now: Date) {
       await sql(
         `update reports set email_status = $2, email_next_attempt_at = $3, email_lease_until = null,
-           email_last_error = $4, email_updated_at = $5
+           email_last_error = $4, email_updated_at = $5,
+           tracking_version = tracking_version + 1
          where id = $1 and email_status = 'sending'`,
         [
           id,
@@ -224,12 +280,14 @@ export function createStore(sql: SqlExecutor) {
       const status = row.email_status as EmailStatus;
       if (name === 'delivered' && (status === 'accepted' || status === 'sending')) {
         await sql(
-          `update reports set email_status = 'delivered', email_delivered_at = $2, email_updated_at = $2 where id = $1`,
+          `update reports set email_status = 'delivered', email_delivered_at = $2,
+             email_updated_at = $2, tracking_version = tracking_version + 1 where id = $1`,
           [id, at.toISOString()],
         );
       } else if ((name === 'bounced' || name === 'complained') && status !== 'complained') {
         await sql(
-          `update reports set email_status = $2, email_last_error = $3, email_updated_at = $4 where id = $1`,
+          `update reports set email_status = $2, email_last_error = $3, email_updated_at = $4,
+             tracking_version = tracking_version + 1 where id = $1`,
           [id, name, `provider:${name}`, at.toISOString()],
         );
       }
@@ -270,7 +328,8 @@ export function createStore(sql: SqlExecutor) {
            email_lease_until = null,
            email_next_attempt_at = null,
            email_last_error = case when email_attempts >= $3 then 'attempts-exhausted' else 'expired' end,
-           email_updated_at = $1
+           email_updated_at = $1,
+           tracking_version = tracking_version + 1
          where (
            (email_status in ('pending', 'failed') and (created_at < $2 or email_attempts >= $3))
            or (email_status = 'sending' and email_lease_until < $1 and (created_at < $2 or email_attempts >= $3))

@@ -1,5 +1,5 @@
 -- Quirón Shield: finalized reports + email delivery state (Neon Postgres).
--- Separate from the questionnaire responses, which stay in Google Sheets (A:X, untouched).
+-- Questionnaire responses remain in Google Sheets; only a row reference is stored here.
 -- Idempotent: safe to run repeatedly (npm run db:migrate).
 
 create table if not exists reports (
@@ -12,6 +12,10 @@ create table if not exists reports (
   narrative_source           text not null check (narrative_source in ('ai', 'template')),
   ai_failure_reason          text,
   created_at                 timestamptz not null,
+  sheet_row_number           int,
+  pdf_downloaded_at          timestamptz,
+  tracking_version           bigint not null default 1,
+  sheet_synced_version       bigint not null default 0,
 
   email_status               text not null check (email_status in
                                ('disabled', 'pending', 'sending', 'accepted', 'delivered',
@@ -26,6 +30,14 @@ create table if not exists reports (
   email_last_error           text,
   email_updated_at           timestamptz not null
 );
+
+-- Safe for existing installations. Historical reports have no linked Sheet row until reviewed.
+alter table reports add column if not exists sheet_row_number int;
+alter table reports add column if not exists pdf_downloaded_at timestamptz;
+alter table reports add column if not exists tracking_version bigint not null default 1;
+alter table reports add column if not exists sheet_synced_version bigint not null default 0;
+create unique index if not exists reports_sheet_row_idx
+  on reports (sheet_row_number) where sheet_row_number is not null;
 
 create index if not exists reports_fingerprint_idx on reports (fingerprint, created_at desc);
 create index if not exists reports_email_due_idx on reports (email_status, email_next_attempt_at);

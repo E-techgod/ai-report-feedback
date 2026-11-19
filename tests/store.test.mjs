@@ -44,6 +44,25 @@ test('a stored report that was tampered with fails its integrity check', async (
   await assert.rejects(() => store.getById(record.id), /integrity/);
 });
 
+test('sheet row linkage and tracking versions are idempotent and guarded', async () => {
+  const store = await freshStore();
+  const original = await seed(store, 'disabled');
+  assert.equal(original.sheetRowNumber, null);
+  const linked = await store.linkSheetRow(original.id, 17);
+  assert.equal(linked.sheetRowNumber, 17);
+  assert.equal((await store.linkSheetRow(original.id, 17)).trackingVersion, linked.trackingVersion);
+  await assert.rejects(() => store.linkSheetRow(original.id, 18), /different spreadsheet row/);
+  assert.deepEqual(await store.listUnsynced(10), [original.id]);
+  await store.markPdfDownloaded(original.id, plus(1000));
+  const downloaded = await store.getById(original.id);
+  assert.equal(downloaded.pdfDownloadedAt.toISOString(), plus(1000).toISOString());
+  await store.markPdfDownloaded(original.id, plus(2000));
+  assert.equal((await store.getById(original.id)).trackingVersion, downloaded.trackingVersion);
+  assert.equal(await store.markSheetSynced(original.id, linked.trackingVersion), false);
+  assert.equal(await store.markSheetSynced(original.id, downloaded.trackingVersion), true);
+  assert.deepEqual(await store.listUnsynced(10), []);
+});
+
 test('claimEmail lets exactly one concurrent caller win', async () => {
   const store = await freshStore();
   const { id } = await seed(store);
