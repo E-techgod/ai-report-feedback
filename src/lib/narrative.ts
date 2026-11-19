@@ -9,15 +9,16 @@ import {
 import type { NarrativeOutcome } from './final-report';
 
 /**
- * Writes the 4 AI text slots (executive summary + one short context per priority) with Claude.
- * Score, level, areas, priorities and actions come from the rules engine; the AI only explains
- * them. The output is forced through a tool schema and validated again with zod.
+ * Writes the 4 AI text slots (executive summary + one short context per priority) with the
+ * configured provider. Score, level, areas, priorities and actions come from the rules engine;
+ * the AI only explains them. The output is forced into a schema and validated again with zod.
+ * Providers are small adapters (request shape + where the JSON sits in the response); the retry,
+ * timeout and fallback logic below is shared.
  *
  * Failure is explicit: the outcome has source 'template' and a failureReason, and the report
  * says so. A template is never presented as AI-written text.
  */
 export const TOOL_NAME = 'entregar_redaccion';
-const API_URL = 'https://api.anthropic.com/v1/messages';
 const ATTEMPT_TIMEOUT_MS = 20_000;
 const TOTAL_BUDGET_MS = 38_000;
 const MAX_ATTEMPTS = 2;
@@ -62,6 +63,39 @@ export function toolDefinition(priorityCount: number) {
   };
 }
 
+type ProviderAdapter = {
+  id: string;
+  url: string;
+  headers: (apiKey: string) => Record<string, string>;
+  body: (modelId: string, model: ReportModel) => unknown;
+  /** Locates the (still unvalidated) JSON candidate inside the provider response. */
+  extract: (data: unknown) => unknown;
+};
+
+const anthropic: ProviderAdapter = {
+  id: 'anthropic',
+  url: 'https://api.anthropic.com/v1/messages',
+  headers: (apiKey) => ({
+    'content-type': 'application/json',
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+  }),
+  body: (modelId, model) => ({
+    model: modelId,
+    max_tokens: 800,
+    system: systemPrompt(model.priorities.length),
+    tools: [toolDefinition(model.priorities.length)],
+    tool_choice: { type: 'tool', name: TOOL_NAME },
+    messages: [{ role: 'user', content: JSON.stringify(buildAiInput(model)) }],
+  }),
+  extract: (data) => {
+    const content = (data as { content?: Array<Record<string, unknown>> } | null)?.content;
+    return content?.find((b) => b.type === 'tool_use' && b.name === TOOL_NAME)?.input;
+  },
+};
+
+const ADAPTER: ProviderAdapter = anthropic;
+
 type Attempt =
   | { ok: true; narrative: NonNullable<ReturnType<typeof validateNarrative>> }
   | { ok: false; reason: string; retryable: boolean };
@@ -75,30 +109,17 @@ async function attempt(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await cfg.fetchImpl(API_URL, {
+    const response = await cfg.fetchImpl(ADAPTER.url, {
       method: 'POST',
       signal: controller.signal,
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': cfg.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: cfg.modelId,
-        max_tokens: 800,
-        system: systemPrompt(count),
-        tools: [toolDefinition(count)],
-        tool_choice: { type: 'tool', name: TOOL_NAME },
-        messages: [{ role: 'user', content: JSON.stringify(buildAiInput(model)) }],
-      }),
+      headers: ADAPTER.headers(cfg.apiKey),
+      body: JSON.stringify(ADAPTER.body(cfg.modelId, model)),
     });
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
       return { ok: false, reason: `http-${response.status}`, retryable };
     }
-    const data = (await response.json()) as { content?: Array<Record<string, unknown>> };
-    const block = data.content?.find((b) => b.type === 'tool_use' && b.name === TOOL_NAME);
-    const narrative = validateNarrative(block?.input, count);
+    const narrative = validateNarrative(ADAPTER.extract(await response.json()), count);
     if (!narrative) return { ok: false, reason: 'invalid-output', retryable: true };
     return { ok: true, narrative };
   } catch (error) {
