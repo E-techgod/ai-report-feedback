@@ -2,8 +2,9 @@
  * Local `.env` -> Vercel Preview or Production synchronization.
  *
  * Safety properties, all covered by tests/env-sync*.test.mjs:
- *  - only an explicit allowlist of variable names is ever read or written; two high-impact secrets
- *    are opt-in and need an extra flag, an extra warning and a different confirmation phrase;
+ *  - default updates use an explicit allowlist; new local names are proposed only when absent
+ *    remotely and need --approve-new before creation; two high-impact secrets are opt-in and need
+ *    an extra flag, an extra warning and a different confirmation phrase;
  *  - values travel to the Vercel CLI through its stdin, never through argv, a shell, a log or a
  *    printed plan; all CLI output is redacted before it is shown;
  *  - nothing is deleted (no `env rm`) and no deployment is triggered;
@@ -51,7 +52,7 @@ export const SYNC_DEFAULT = [
  */
 export const SYNC_OPT_IN = ['REPORT_TOKEN_SECRET', 'CRON_SECRET'] as const;
 
-/** Every name this workflow may ever write. */
+/** Names approved for updates or explicit secret rotation. New names can be approved for creation. */
 export const SYNC_ALLOWLIST = [...SYNC_DEFAULT, ...SYNC_OPT_IN] as const;
 
 /**
@@ -64,6 +65,7 @@ export const SYNC_ALLOWLIST = [...SYNC_DEFAULT, ...SYNC_OPT_IN] as const;
  */
 export const NEVER_SYNCED = [
   'REPORT_EMAIL_ENABLED',
+  'REPORT_EMAIL_ALLOWLIST',
   'DATABASE_URL',
   'DATABASE_URL_UNPOOLED',
   'GOOGLE_SHEETS_WEBHOOK_URL',
@@ -86,7 +88,7 @@ const PLAN_NOTES: Record<string, string> = {
   NEXT_PUBLIC_BOOKING_URL: 'inlined at build time: needs a rebuild, not only a restart',
 };
 
-export type Operation = 'create' | 'update' | 'upsert' | 'skip' | 'blocked';
+export type Operation = 'create' | 'update' | 'upsert' | 'propose' | 'skip' | 'blocked';
 export type PlanItem = { name: string; operation: Operation; note?: string };
 
 export function readEnvFile(file: string): Record<string, string> {
@@ -307,6 +309,50 @@ export function buildPlan(
     if (verdict.kind === 'blocked') return { name, operation: 'blocked', note: verdict.reason };
     return { name, operation: verdict.kind, note };
   });
+}
+
+/** New local names are proposed only when absent from every Vercel environment. */
+export function isNewVariableCandidate(name: string): boolean {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
+  if ((SYNC_ALLOWLIST as readonly string[]).includes(name)) return false;
+  if ((NEVER_SYNCED as readonly string[]).includes(name)) return false;
+  if (/^(DATABASE_URL|GOOGLE_SHEETS_WEBHOOK_|REPORT_EMAIL_|VERCEL_|NOW_)/.test(name))
+    return false;
+  return !['NODE_ENV', 'NEXT_RUNTIME', 'CI', 'PORT'].includes(name);
+}
+
+export function buildNewVariablePlan(
+  local: Record<string, string>,
+  state: ProjectState,
+  approved: readonly string[] = [],
+): PlanItem[] {
+  const approvedSet = new Set(approved);
+  return Object.keys(local)
+    .filter((name) => isNewVariableCandidate(name) && local[name].trim() !== '')
+    .sort()
+    .flatMap((name): PlanItem[] => {
+      if (!state.ok)
+        return approvedSet.has(name)
+          ? [{ name, operation: 'blocked', note: 'Vercel records could not be verified' }]
+          : [];
+      if (state.records.some((record) => record.key === name))
+        return approvedSet.has(name)
+          ? [
+              {
+                name,
+                operation: 'blocked',
+                note: 'already exists in Vercel; new-name approval cannot overwrite it',
+              },
+            ]
+          : [];
+      return [
+        {
+          name,
+          operation: approvedSet.has(name) ? 'create' : 'propose',
+          note: 'new local name; create only, never overwrite',
+        },
+      ];
+    });
 }
 
 export function selectNames(
@@ -648,6 +694,8 @@ export type SyncOptions = {
   dryRun: boolean;
   target?: SyncTarget;
   only?: string[];
+  /** Explicitly approve local names outside the fixed allowlist for creation only. */
+  approveNew?: string[];
   /** Required to touch REPORT_TOKEN_SECRET / CRON_SECRET (together with naming them in `only`). */
   allowRotation?: boolean;
   /** Apply requires the projectId the operator expects; it must equal the resolved link. */
@@ -680,10 +728,20 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const { cwd, envFile, log } = options;
   const target = options.target ?? 'production';
   const baseEnv = options.env ?? process.env;
-  const names = selectNames(options.only, options.allowRotation);
+  const defaultNames = selectNames(options.only, options.allowRotation);
   const file = path.resolve(cwd, envFile);
   if (!existsSync(file)) throw new Error(`Env file not found: ${path.relative(cwd, file)}`);
   (options.assertProtected ?? assertEnvFileProtected)(envFile, cwd);
+  const local = readEnvFile(file);
+  const approvedNew = [...new Set(options.approveNew ?? [])];
+  if (options.only && approvedNew.length)
+    throw new Error('--only cannot be combined with --approve-new; run separate focused commands');
+  for (const name of approvedNew) {
+    if (!isNewVariableCandidate(name) || !local[name]?.trim())
+      throw new Error(`--approve-new ${name} is not an eligible nonempty local variable`);
+  }
+  // A new-name approval is a focused create run; it cannot update default allowlisted variables.
+  const names = approvedNew.length ? [] : defaultNames;
 
   const problems: string[] = [];
   const identityResult = resolveProjectIdentity(cwd, baseEnv);
@@ -710,7 +768,6 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
       throw new Error('--expect-org does not match the linked Vercel organization; nothing was written');
   }
 
-  const local = readEnvFile(file);
   const secrets = () => Object.values(local).filter((value) => value.trim() !== '');
   const childEnv: NodeJS.ProcessEnv = identityResult.ok
     ? {
@@ -729,7 +786,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
   if (list.ok)
     log(
-      `Existing variables read: ${list.records.length} record(s) (only allowlisted names are compared); ` +
+      `Existing variables read: ${list.records.length} record(s) (local names are compared); ` +
         `custom environments: ${list.customEnvironments}.`,
     );
   else {
@@ -738,11 +795,20 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
       problems.push(`existing variables not verified: ${list.reason}`);
   }
 
-  const plan = buildPlan(local, list, names, target);
+  const plan = [
+    ...buildPlan(local, list, names, target),
+    ...(options.only ? [] : buildNewVariablePlan(local, list, approvedNew)),
+  ];
   log(formatPlan(plan));
-  const todo = plan.filter((item) => item.operation !== 'skip' && item.operation !== 'blocked');
+  const todo = plan.filter((item) => ['create', 'update', 'upsert'].includes(item.operation));
   const skipped = plan.filter((item) => item.operation === 'skip').map((item) => item.name);
   const blocked = plan.filter((item) => item.operation === 'blocked').map((item) => item.name);
+  const proposed = plan.filter((item) => item.operation === 'propose').map((item) => item.name);
+  if (proposed.length)
+    log(
+      `  PROPOSED (not applied): ${proposed.join(', ')}. ` +
+        `To create, rerun with --approve-new ${proposed.join(',')}.`,
+    );
   for (const item of todo) {
     const warning = OPT_IN_WARNINGS[item.name];
     if (warning) log(`  WARNING ${item.name}: ${warning}`);
@@ -790,7 +856,10 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const fresh = await readProjectState(runner);
   if (!fresh.ok)
     throw new Error(`Cannot re-verify existing variables (${fresh.reason}); nothing was written`);
-  const freshPlan = buildPlan(local, fresh, names, target);
+  const freshPlan = [
+    ...buildPlan(local, fresh, names, target),
+    ...(options.only ? [] : buildNewVariablePlan(local, fresh, approvedNew)),
+  ];
   const signature = (items: readonly PlanItem[]) =>
     JSON.stringify(items.map((item) => [item.name, item.operation]));
   const todoNames = todo.map((item) => item.name);

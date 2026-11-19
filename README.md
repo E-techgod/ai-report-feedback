@@ -48,7 +48,7 @@ Setup: create a Neon database, set the variables in `.env.example`, then run `np
 
 ## Environment sync (local `.env` → Vercel Preview or Production)
 
-The local `.env` is the source for the explicit allowlist below. The workflow uses the official Vercel CLI, handles Preview and Production independently, and never deploys or deletes variables.
+The local `.env` is the source for the explicit allowlist below. New names in `.env` are detected and proposed for creation when absent from Vercel; they require separate approval before any write. The workflow uses the official Vercel CLI, handles Preview and Production independently, and never deploys or deletes variables.
 
 **One-time setup:** `npm i -g vercel`, `vercel login`, then `vercel link` in this folder (creates the git-ignored `.vercel/`). Set `VERCEL_BIN` if the CLI is not on your `PATH`. Needs a CLI recent enough to support `vercel env ls --format json` and `vercel api` (used read-only to list custom environments; if your CLI cannot run it, applies are refused rather than guessed).
 
@@ -57,6 +57,7 @@ npm run env:check                                  # read-only plans for Preview
 npm run env:sync:preview -- --expect-project prj_xxx     # Preview only; type "sync preview"
 npm run env:sync:production -- --expect-project prj_xxx  # Production only; type "sync production"
 npm run env:sync:preview -- --dry-run                    # read-only Preview plan
+npm run env:sync:preview -- --approve-new NEW_SERVICE_TOKEN --expect-project prj_xxx
 npm run env:sync:production -- --only EMAIL_FROM,RESEND_API_KEY --expect-project prj_xxx
 ```
 
@@ -67,10 +68,11 @@ Other options: `--offline` (dry run without calling the CLI) and `--env-file <pa
 ### What it does
 
 - **Default allowlist:** `GOOGLE_SHEET_ID`, `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `APP_URL`, `NEXT_PUBLIC_BOOKING_URL` (list in `scripts/lib/env-sync.ts`). Missing or empty local values are skipped, never written as blanks.
+- **New names:** nonempty names in `.env` outside the allowlist are shown as `propose` when absent from every Vercel environment. A normal sync leaves them untouched. To approve creation, run the sync command with `--approve-new NAME[,NAME...] --expect-project <id>` and type the usual target-specific phrase. This focused run creates only the approved names, without `--force`; if a name exists remotely by then, the whole run is refused. `--only` and `--approve-new` cannot be combined. Add new application variables to `.env.example` without values or credentials.
 - **Opt-in secrets:** `REPORT_TOKEN_SECRET` and `CRON_SECRET` are **not** part of a default run. They need `--only <name> --allow-secret-rotation`, print a warning, and require `rotate preview secrets` or `rotate production secrets` for the selected target.
   - Replacing `REPORT_TOKEN_SECRET` invalidates every previously issued report link and download.
   - `CRON_SECRET` has no separate cron-side setting: Vercel sends the project's `CRON_SECRET` as the `Authorization: Bearer` header of cron requests (`vercel.json` only holds the path and schedule), and `/api/cron/retry-emails` rejects any other bearer. A new value takes effect with the next deployment.
-- **Never synced, on purpose:** `REPORT_EMAIL_ENABLED` and `REPORT_EMAIL_ALLOWLIST` (delivery controls managed in the Vercel dashboard), `DATABASE_URL*` (owned by the Neon integration), and the legacy `GOOGLE_SHEETS_WEBHOOK_*`. Asking for one with `--only` is an error.
+- **Never synced, on purpose:** `REPORT_EMAIL_ENABLED` and `REPORT_EMAIL_ALLOWLIST` (delivery controls managed in the Vercel dashboard), `DATABASE_URL*` (owned by the Neon integration), and the legacy `GOOGLE_SHEETS_WEBHOOK_*`. These and runtime names such as `VERCEL_*`, `NOW_*`, and `NODE_ENV` are not proposed as new variables. Asking for a protected name with `--only` or `--approve-new` is an error.
 - **Create or update, failing closed:** the tool lists the project's variables (`vercel env ls --format json`; malformed or unexpected output is an error) and reads the project's **custom environments** (`vercel api /v9/projects/<projectId>/custom-environments`). It then writes a variable only in two cases:
   - **create** — the variable is absent from the listing. Run as `vercel env add NAME <target>` with **no `--force`**, so the CLI does not ask the API to upsert.
   - **update** — exactly one record for the selected target only, no branch scope, and **the project has no custom environments**. Run as `vercel env add NAME <target> --force`, the only place `--force` is used.
