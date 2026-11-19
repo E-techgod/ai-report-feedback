@@ -1,25 +1,25 @@
 /*
  * Styles for ReportView — ported from report-template/quiron-report-prototype-v2.html.
  * Scoped as a CSS Module, so class names here never clash with src/app/globals.css.
- * Colour legend: --det (blue) = rules engine, --ai (purple) = AI text, --static = fixed UI.
+ * Colour legend: --det = rules engine, --ai = AI text, --static = fixed UI.
  */
 .root {
-  --bg: #000000;
-  --paper: #16171a;
-  --ink: #ffffff;
-  --muted: #a1a4ad;
-  --line: #34363c;
-  --forest: #1a1a1c;
-  --det: #72b9f5;
-  --det-bg: #1b2a3a;
-  --det-line: #32618a;
-  --ai: #cba7ed;
-  --ai-bg: #2a2034;
-  --ai-line: #674181;
-  --static: #a1a4ad;
-  --static-bg: #292a2e;
-  --amber: #d95d1e;
-  --amber-bg: #3b241b;
+  --bg: var(--color-background);
+  --paper: var(--color-background);
+  --ink: var(--color-text);
+  --muted: var(--color-muted);
+  --line: var(--color-border);
+  --forest: var(--color-surface);
+  --det: var(--color-text);
+  --det-bg: var(--color-surface);
+  --det-line: var(--color-border);
+  --ai: var(--color-accent-text);
+  --ai-bg: var(--color-surface);
+  --ai-line: var(--color-border);
+  --static: var(--color-muted);
+  --static-bg: var(--color-surface);
+  --amber: var(--color-accent);
+  --amber-bg: var(--color-surface);
   background: var(--bg);
   color: var(--ink);
   font:
@@ -38,7 +38,7 @@
 }
 .root a:focus-visible,
 .root button:focus-visible {
-  outline: 3px solid #d95d1e;
+  outline: 3px solid var(--color-accent);
   outline-offset: 3px;
 }
 
@@ -58,9 +58,9 @@
   color: var(--muted);
 }
 .pdfButton {
-  border: 1px solid #d95d1e;
-  background: #d95d1e;
-  color: #000000;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-text);
   border-radius: 8px;
   padding: 10px 16px;
   font: inherit;
@@ -69,7 +69,7 @@
   cursor: pointer;
 }
 .pdfButton:hover:not(:disabled) {
-  background: #b94d17;
+  background: #c75818;
 }
 .pdfButton:disabled {
   opacity: 0.5;
@@ -82,7 +82,7 @@
 }
 .reviewbarInner {
   border: 1px solid var(--line);
-  background: #1d1e22;
+  background: var(--color-surface);
   padding: 14px 18px;
   border-radius: 12px;
   display: flex;
@@ -113,7 +113,7 @@
   padding: 5px 10px;
   font-size: 11px;
   font-weight: 700;
-  background: #1d1e22;
+  background: var(--color-surface);
 }
 .miniDet {
   border-color: var(--det-line);
@@ -178,16 +178,16 @@
 }
 .nav a:hover,
 .navActive {
-  background: #2c211d;
-  color: #ffffff !important;
-  box-shadow: inset 3px 0 0 #d95d1e;
+  background: var(--color-surface);
+  color: var(--color-text) !important;
+  box-shadow: inset 3px 0 0 var(--color-accent);
 }
 .navActive span {
-  color: #d95d1e !important;
+  color: var(--color-accent-text) !important;
 }
 .sideCard {
   border: 1px solid var(--line);
-  background: #1d1e22;
+  background: var(--color-surface);
   border-radius: 13px;
   padding: 17px;
   margin-top: 19px;
@@ -222,7 +222,7 @@
   background: var(--ai);
 }
 .dotStatic {
-  background: #a1a4ad;
+  background: var(--color-muted);
 }
 .mixBar {
   display: flex;
@@ -232,7 +232,7 @@
   border-radius: 8px;
   margin: 15px 0 14px;
   gap: 2px;
-  background: #1d1e22;
+  background: var(--color-surface);
 }
 .barDet {
   width: 65%;
@@ -240,7 +240,7 @@
 }
 .barStatic {
   width: 20%;
-  background: #a1a4ad;
+  background: var(--color-muted);
 }
 .barAi {
   width: 15%;
@@ -294,7 +294,7 @@
   border: 1px solid var(--line);
   border-radius: 17px;
   overflow: hidden;
-  box-shadow: 0 22px 65px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 14px 42px rgba(17, 17, 17, 0.05);
 }
 .paper h1,
 .paper h2,
@@ -333,20 +333,20 @@
   color: var(--ink);
 }
 .demoNotice {
-  background: #3b241b;
-  border-bottom: 1px solid #64402b;
-  color: #f2aa83;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-accent-text);
   padding: 11px 40px;
   font-size: 11px;
   font-weight: 650;
 }
 .hero {
-  background: #1a1a1c;
+  background: var(--color-surface);
   padding: 41px 40px 37px;
   border-bottom: 1px solid var(--line);
 }
 .hero .eyebrow {
-  color: #d95d1e;
+  color: var(--color-accent-text);
 }
 .paper .lead {
   font-size: 14px;
@@ -373,7 +373,7 @@
 }
 .scoreCard {
   padding: 20px 21px;
-  background: #1d1e22;
+  background: var(--color-surface);
   border: 1px solid var(--line);
   border-radius: 12px;
   min-width: 0;
@@ -389,7 +389,7 @@
     ui-sans-serif,
     system-ui,
     sans-serif;
-  color: #d95d1e;
+  color: var(--color-accent);
   margin: 7px 0 4px;
 }
 .scoreOf {
@@ -404,24 +404,24 @@
   display: inline-flex;
   font-size: 10px;
   font-weight: 800;
-  color: #000000;
+  color: var(--color-text);
   background: var(--amber);
   border-radius: 999px;
   padding: 4px 9px;
 }
 .levelGreen {
-  color: #000000;
+  color: var(--color-text);
   background: var(--amber);
 }
 .progress {
   height: 7px;
   border-radius: 10px;
-  background: #34363c;
+  background: var(--color-border);
   margin: 14px 0 8px;
   overflow: hidden;
 }
 .progressFill {
-  background: #d95d1e;
+  background: var(--color-accent);
   height: 100%;
   border-radius: 10px;
 }
@@ -433,7 +433,7 @@
 .printLogo {
   width: 120px;
   height: 52px;
-  background: #000;
+  background: var(--color-background);
   border-radius: 4px;
   overflow: hidden;
   display: grid;
@@ -474,7 +474,7 @@
     ui-sans-serif,
     system-ui,
     sans-serif;
-  color: #d95d1e;
+  color: var(--color-accent);
   min-width: 30px;
 }
 .paper .secSub {
@@ -524,7 +524,7 @@
 }
 .contentPanel {
   border: 1px solid var(--line);
-  background: #1d1e22;
+  background: var(--color-surface);
   border-radius: 12px;
   padding: 19px 20px;
   margin-top: 12px;
@@ -542,7 +542,7 @@
   margin-top: 14px;
 }
 .signal {
-  background: #1d1e22;
+  background: var(--color-surface);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 14px;
@@ -568,14 +568,14 @@
 /* ---------- AI text slots: neutral for clients, purple in team view ---------- */
 .aiBox {
   border: 1px solid var(--line);
-  background: #1d1e22;
+  background: var(--color-surface);
   border-radius: 12px;
   padding: 17px 19px;
   margin-top: 15px;
 }
 .aiBoxTeam {
   border: 1px dashed var(--ai-line);
-  background: #251e2d;
+  background: var(--color-surface);
 }
 .aiHead {
   display: flex;
@@ -586,11 +586,11 @@
 }
 .aiHead strong {
   font-size: 12px;
-  color: #cba7ed;
+  color: var(--color-accent-text);
 }
 .aiLimit {
   font-size: 10px;
-  color: #cba7ed;
+  color: var(--color-accent-text);
   background: var(--ai-bg);
   padding: 3px 8px;
   border-radius: 999px;
@@ -604,12 +604,12 @@
 }
 .aiBoxTeam .aiContent {
   margin-top: 10px;
-  color: #d1c4d9;
+  color: var(--color-text);
 }
 .aiMeta {
   margin: 9px 0 0;
   font-size: 10px;
-  color: #b6a4c4;
+  color: var(--color-muted);
 }
 .pending {
   display: block;
@@ -629,7 +629,7 @@
   padding: 17px;
   border-radius: 11px;
   min-width: 0;
-  background: #1d1e22;
+  background: var(--color-surface);
 }
 .areaTop {
   display: flex;
@@ -659,11 +659,11 @@
   font-weight: 750;
   white-space: nowrap;
   background: var(--amber);
-  color: #000000;
+  color: var(--color-text);
 }
 .chipGreen {
   background: var(--amber);
-  color: #000000;
+  color: var(--color-text);
 }
 .priority {
   display: grid;
@@ -681,7 +681,7 @@
     ui-sans-serif,
     system-ui,
     sans-serif;
-  color: #d95d1e;
+  color: var(--color-accent);
 }
 .priority h3 {
   font-size: 14px;
@@ -694,7 +694,7 @@
   margin: 6px 0;
 }
 .priorityLine b {
-  color: #ffffff;
+  color: var(--color-text);
 }
 .priority .aiBox {
   margin-top: 13px;
@@ -702,12 +702,12 @@
 }
 .allGood {
   border: 1px solid var(--line);
-  background: #1d1e22;
+  background: var(--color-surface);
   border-radius: 12px;
   padding: 18px 20px;
 }
 .timeline {
-  border-left: 2px solid #46484e;
+  border-left: 2px solid var(--color-border);
   padding-left: 24px;
   margin: 9px 0 0 10px;
 }
@@ -725,8 +725,8 @@
   left: -31px;
   width: 10px;
   height: 10px;
-  background: #d95d1e;
-  border: 3px solid #1d1e22;
+  background: var(--color-accent);
+  border: 3px solid var(--color-surface);
   border-radius: 50%;
 }
 .step small {
@@ -746,8 +746,8 @@
   border-radius: 12px;
   padding: 26px;
   margin-top: 24px;
-  background: #1a1a1c;
-  color: #fff;
+  background: var(--color-surface);
+  color: var(--color-text);
 }
 .paper .cta h3 {
   font:
@@ -755,7 +755,7 @@
     ui-sans-serif,
     system-ui,
     sans-serif;
-  color: #fff;
+  color: var(--color-text);
 }
 .paper .cta p {
   color: var(--muted);
@@ -764,10 +764,10 @@
 .ctaButton {
   display: inline-block;
   padding: 10px 16px;
-  background: #d95d1e;
+  background: var(--color-accent);
   border: 0;
   border-radius: 8px;
-  color: #000000;
+  color: var(--color-text);
   font: inherit;
   font-size: 12px;
   font-weight: 800;
@@ -775,7 +775,7 @@
   cursor: pointer;
 }
 .ctaButton:hover:not(:disabled) {
-  background: #b94d17;
+  background: #c75818;
 }
 .ctaButton:disabled {
   opacity: 0.55;
@@ -833,7 +833,7 @@
   .nav a {
     white-space: nowrap;
     flex: none;
-    background: #1d1e22;
+    background: var(--color-surface);
     border: 1px solid var(--line);
     padding: 8px 10px;
   }
@@ -870,7 +870,7 @@
 }
 @media print {
   .root {
-    background: #000000;
+    background: var(--color-background);
     padding: 0;
   }
   .actionbar,
@@ -901,7 +901,7 @@
     border-bottom: 1px solid var(--line);
   }
   .hero {
-    background: #1a1a1c !important;
+    background: var(--color-surface) !important;
   }
   .hero,
   .section {
@@ -923,15 +923,15 @@
   }
   .aiBox,
   .aiBoxTeam {
-    background: #1d1e22 !important;
+    background: var(--color-surface) !important;
     border: 1px solid var(--line) !important;
   }
   .aiBox .aiContent {
     color: var(--muted) !important;
   }
   .cta {
-    background: #1a1a1c !important;
-    color: #fff !important;
+    background: var(--color-surface) !important;
+    color: var(--color-text) !important;
   }
   .root * {
     print-color-adjust: exact;
@@ -949,9 +949,9 @@
 }
 .emailOk {
   background: var(--amber-bg);
-  color: #f2aa83;
+  color: var(--color-accent-text);
 }
 .emailError {
   background: var(--amber);
-  color: #000000;
+  color: var(--color-text);
 }

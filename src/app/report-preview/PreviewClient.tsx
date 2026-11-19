@@ -74,9 +74,9 @@ export default function PreviewClient() {
   }, [preset, simulateAi]);
 
   const btn = (on: boolean) => ({
-    border: '1px solid #1b6246',
-    background: on ? '#143b2c' : '#fff',
-    color: on ? '#fff' : '#143b2c',
+    border: '1px solid var(--color-border)',
+    background: on ? 'var(--color-accent)' : 'var(--color-background)',
+    color: 'var(--color-text)',
     borderRadius: 8,
     padding: '7px 12px',
     font: 'inherit',
@@ -85,7 +85,7 @@ export default function PreviewClient() {
   });
 
   return (
-    <div style={{ background: '#f4f3ee', minHeight: '100vh' }}>
+    <div style={{ background: 'var(--color-background)', minHeight: '100vh' }}>
       <div
         className="preview-controls"
         style={{
@@ -93,10 +93,12 @@ export default function PreviewClient() {
           gap: 8,
           flexWrap: 'wrap',
           padding: '12px 16px',
-          background: '#102b21',
+          background: 'var(--color-surface)',
         }}
       >
-        <strong style={{ color: '#d9f5e3', fontSize: 12, alignSelf: 'center', marginRight: 8 }}>
+        <strong
+          style={{ color: 'var(--color-text)', fontSize: 12, alignSelf: 'center', marginRight: 8 }}
+        >
           VISTA PREVIA (solo desarrollo)
         </strong>
         {PRESETS.map((p, i) => (
