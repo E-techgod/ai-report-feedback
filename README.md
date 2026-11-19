@@ -1,6 +1,6 @@
 # Quirón Shield Survey — MVP
 
-Standalone Next.js questionnaire: 20 yes/no questions, deterministic score, AI-assisted short summary, report/PDF via browser print, and appointment-booking CTA.
+Standalone Next.js questionnaire: 20 yes/no questions, deterministic score, one finalized AI-assisted report shown on the web, downloadable as a server-rendered PDF and emailed automatically, plus an appointment-booking CTA. See `docs/report-email.md` for the architecture, configuration and migration plan.
 
 ## Setup
 
@@ -31,19 +31,20 @@ Duplicate protection (no schema change): the client keeps one submission id per 
 - The in-memory id/rate-limit guards are per server instance; the sheet check covers cross-instance duplicates.
 - `scripts/google-apps-script.gs` and `/api/submit` are the legacy webhook bridge and are no longer used by the UI.
 
-## Report, AI and PDF
+## Report, AI, PDF and email
 
-The results page is `src/components/ReportView.tsx` (styles: `ReportView.module.css`), built from `report-template/quiron-report-prototype-v2.html`.
+One **finalized report** is built on the server per submission, stored in Postgres, and used for the web page, the PDF and the email (details: `docs/report-email.md`).
 
 - **Rules engine (~65%)** — `src/lib/report.ts`: score, level (same labels as the Dashboard), the 6 areas, ranked top-3 priorities, findings, actions and the action plan. Deterministic and covered by tests.
-- **Fixed interface (~20%)** — headings, descriptions, CTA, disclaimer.
-- **AI (~15%)** — exactly 4 text slots filled by `POST /api/summary`: an executive summary (≤90 words) and a short context for each priority (≤25 words). The AI never calculates, selects or reorders anything. It receives only the computed result (`buildAiInput`): score, level, number of areas to strengthen, focus, and the priorities' titles/findings/actions. No names, emails or raw answers.
-- **Fallback** — if `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` are missing, the call fails, times out (8.5 s) or returns something outside the contract, the report shows template text (`fallbackNarrative`) and the "Cómo se elaboró este reporte" note says the AI was not used. The reason is logged server-side as `[summary] AI fallback used: <reason>`.
-- **PDF** — "Descargar PDF" opens the browser print dialog (choose _Save as PDF_). The button waits until the AI text has loaded so the PDF matches the page. Print layout (A4, logo header, no navigation) is in the `@media print` block of `ReportView.module.css`.
-- **Editing the design** — run `npm run dev` and open `/report-preview` (development only, 404 in production). It renders the report from sample answers; use `?view=client&ai=1&preset=0` to start in a given state. The "Vista del equipo" mode shows the prototype's review annotations and the 65/20/15 panel; customers always get the client view.
+- **Fixed interface (~20%)** — headings, descriptions, CTA, disclaimer, all in `src/lib/report-content.ts`, the single source of every customer-visible string for the web view, PDF and email.
+- **AI (~15%)** — exactly 4 text slots written by Claude (`src/lib/narrative.ts`): an executive summary (≤90 words) and a short context for each priority (≤25 words). The call is forced through a tool schema, re-validated with zod, and retried once. The AI receives only computed results (no names, emails or raw answers) and never calculates, selects or reorders anything.
+- **AI failure** — if Claude is unconfigured, times out or returns invalid output, the report is finalized with template text, stored as `narrativeSource: "template"`, and the report itself says the AI was not used. It is never presented as AI-written.
+- **PDF** — rendered on the server (`@react-pdf/renderer`) from the stored report, not from the browser. "Descargar PDF" downloads it and the same file is attached to the email.
+- **Email** — sent by Resend right after the report is stored, to the address supplied in the questionnaire. Status shown to the user comes from the database ("Informe enviado" / "No se pudo enviar el correo"). Nothing is sent unless `REPORT_EMAIL_ENABLED=true`.
+- **Editing the design** — run `npm run dev` and open `/report-preview` (development only, 404 in production) to review the web view with sample data, in client or team mode, with each email status.
 - **Editorial review needed** — the area/priority/context catalog in `src/lib/report.ts` (`THEMES`) reuses the prototype wording for three areas; the other three are drafts in the same tone.
 
-`ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` are server-only; set `ANTHROPIC_MODEL` to an exact, currently available model ID.
+Setup: create a Neon database, set the variables in `.env.example`, then run `npm run db:migrate` once.
 
 ## Booking
 
@@ -53,7 +54,7 @@ Set `NEXT_PUBLIC_BOOKING_URL` to the real, published Google Appointment Schedule
 
 - Must validate privacy/consent language and suitability of questions before a public blast.
 - No scoring adjustments for nonapplicable questions. All twenty must be answered. Confirm this business rule before launch.
-- Google Sheets is the sole persistence layer. No public report retrieval links or dashboard in V1.
+- Questionnaire responses live only in Google Sheets (A:X). Finalized reports and email status live in Postgres. Reports and PDFs are retrievable only with the per-report access token issued to the submitting browser; there are no public links.
 - Rate limiting / CAPTCHA, spam monitoring, credential rotation, retention policies, authorized staff access, and legal review are needed before a high-volume campaign.
 - Ensure Vercel plan permits commercial usage. Secrets must never be in `NEXT_PUBLIC_` vars or committed.
-- Do not start bulk emailing until the webhook, AI fallback, booking, and responsive UI are verified end to end.
+- Do not enable `REPORT_EMAIL_ENABLED` until the migration in `docs/report-email.md` is approved and a real test submission has been verified end to end.

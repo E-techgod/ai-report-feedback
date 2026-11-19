@@ -1,6 +1,8 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import ReportView from '@/components/ReportView';
+import ReportView, { type EmailStatusView } from '@/components/ReportView';
+import { getBookingUrl } from '@/lib/booking';
+import type { FinalReport } from '@/lib/final-report';
 import { questions } from '@/lib/questions';
 import { buildReportModel, fallbackNarrative } from '@/lib/report';
 
@@ -16,6 +18,14 @@ const PRESETS = [
   { label: '100% · Excelente', yes: questions.map((q) => q.id) },
 ];
 
+const EMAIL_STATES: Array<{ label: string; value: EmailStatusView | null }> = [
+  { label: 'Correo: sin línea', value: null },
+  { label: 'Correo: enviando', value: { state: 'sending', to: 'a••@ejemplo.com' } },
+  { label: 'Correo: enviado', value: { state: 'sent', to: 'a••@ejemplo.com' } },
+  { label: 'Correo: rebotó', value: { state: 'bounced', to: 'a••@ejemplo.com' } },
+  { label: 'Correo: falló', value: { state: 'failed', to: 'a••@ejemplo.com' } },
+];
+
 const SAMPLE_AI_SUMMARY =
   'El resultado preliminar muestra áreas de protección que conviene atender de forma ordenada. La planeación sucesoria destaca entre los puntos a revisar, junto con la protección familiar y la organización documental. Estos indicadores no equivalen a una valoración definitiva: sirven como punto de partida para contrastar tu situación con documentación vigente y definir acciones concretas con un especialista.';
 
@@ -23,14 +33,15 @@ export default function PreviewClient() {
   const [preset, setPreset] = useState(0);
   const [team, setTeam] = useState(true);
   const [simulateAi, setSimulateAi] = useState(false);
-  const [pending, setPending] = useState(false);
+  const [emailIdx, setEmailIdx] = useState(0);
 
   // Optional URL parameters, e.g. /report-preview?view=client&ai=1&preset=2
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     if (q.get('view') === 'client') setTeam(false);
     if (q.get('ai') === '1') setSimulateAi(true);
-    if (q.get('pending') === '1') setPending(true);
+    const e = Number(q.get('email'));
+    if (Number.isInteger(e) && e >= 0 && e < EMAIL_STATES.length) setEmailIdx(e);
     const n = Number(q.get('preset'));
     if (Number.isInteger(n) && n >= 0 && n < PRESETS.length) setPreset(n);
   }, []);
@@ -40,7 +51,13 @@ export default function PreviewClient() {
     const answers = Object.fromEntries(questions.map((q) => [q.id, yes.has(q.id)]));
     const model = buildReportModel(answers);
     const fallback = fallbackNarrative(model);
-    return {
+    // Built by hand: the server-side builder (final-report.ts) uses node:crypto.
+    const finalReport: FinalReport = {
+      version: 1,
+      reportId: '00000000-0000-4000-8000-000000000001',
+      submissionId: '00000000-0000-4000-8000-000000000002',
+      firstName: 'Ana',
+      generatedAt: '2026-11-18T18:00:00Z',
       model,
       narrative: simulateAi
         ? {
@@ -50,8 +67,11 @@ export default function PreviewClient() {
               : fallback.executiveSummary,
           }
         : fallback,
-      aiUsed: simulateAi,
+      narrativeSource: simulateAi ? 'ai' : 'template',
+      aiFailureReason: simulateAi ? null : 'preview',
+      bookingUrl: getBookingUrl(process.env.NEXT_PUBLIC_BOOKING_URL),
     };
+    return finalReport;
   }, [preset, simulateAi]);
 
   const btn = (on: boolean) => ({
@@ -91,16 +111,17 @@ export default function PreviewClient() {
         <button style={btn(simulateAi)} onClick={() => setSimulateAi(!simulateAi)}>
           {simulateAi ? 'Texto IA simulado' : 'Texto de plantilla'}
         </button>
-        <button style={btn(pending)} onClick={() => setPending(!pending)}>
-          {pending ? 'IA pendiente: sí' : 'IA pendiente: no'}
+        <button
+          style={btn(emailIdx > 0)}
+          onClick={() => setEmailIdx((emailIdx + 1) % EMAIL_STATES.length)}
+        >
+          {EMAIL_STATES[emailIdx].label}
         </button>
       </div>
       <ReportView
         report={report}
-        firstName="Ana"
-        generatedAt="2026-11-18T18:00:00Z"
         mode={team ? 'team' : 'client'}
-        aiPending={pending}
+        email={EMAIL_STATES[emailIdx].value}
       />
     </div>
   );

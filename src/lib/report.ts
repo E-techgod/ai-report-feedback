@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { scoreAnswers, type Answers, type Score } from './scoring';
 
 /**
@@ -240,23 +241,25 @@ export function fallbackNarrative(model: ReportModel): Narrative {
   };
 }
 
-/** Accepts the AI output only if it matches the contract exactly; otherwise null (use fallback). */
+/** Structured contract for the AI output: exact priority count and word limits. */
+export function narrativeSchema(priorityCount: number) {
+  const text = (maxWords: number) =>
+    z
+      .string()
+      .transform((v) => v.trim())
+      .refine((v) => wordCount(v) > 0 && wordCount(v) <= maxWords);
+  return z
+    .object({
+      executiveSummary: text(MAX_SUMMARY_WORDS),
+      priorityContexts: z.array(text(MAX_CONTEXT_WORDS)).length(priorityCount),
+    })
+    .strict();
+}
+
+/** Accepts the AI output only if it matches the contract exactly; otherwise null. */
 export function validateNarrative(candidate: unknown, priorityCount: number): Narrative | null {
-  if (!candidate || typeof candidate !== 'object') return null;
-  const { executiveSummary, priorityContexts } = candidate as Record<string, unknown>;
-  if (typeof executiveSummary !== 'string') return null;
-  const summaryWords = wordCount(executiveSummary);
-  if (summaryWords === 0 || summaryWords > MAX_SUMMARY_WORDS) return null;
-  if (!Array.isArray(priorityContexts) || priorityContexts.length !== priorityCount) return null;
-  for (const c of priorityContexts) {
-    if (typeof c !== 'string') return null;
-    const words = wordCount(c);
-    if (words === 0 || words > MAX_CONTEXT_WORDS) return null;
-  }
-  return {
-    executiveSummary: executiveSummary.trim(),
-    priorityContexts: (priorityContexts as string[]).map((c) => c.trim()),
-  };
+  const parsed = narrativeSchema(priorityCount).safeParse(candidate);
+  return parsed.success ? parsed.data : null;
 }
 
 /**
