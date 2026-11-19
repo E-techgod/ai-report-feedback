@@ -26,8 +26,10 @@ legacy Apps Script source still needs review: a helper in this repo reads answer
 positions and must not be treated as safe after the insertion.
 
 The app reads headers for every append and tracking sync. Missing or duplicate required headers
-stop the write. It appends a full row with blank tracking cells, then links the confirmed row number
-to the report in Neon. A sync checks the row's email, all 20 answers via the persisted fingerprint,
+stop the write. It appends a full row with `Estado Reporte=Pendiente` and a temporary
+`submission:<uuid>` marker in `ID Reporte`; a retry can find that row even after the ten-minute
+answer dedupe window. Once the report is stored, the app links the confirmed row number in Neon and
+replaces the marker with the final report UUID. A sync checks the row's email, all 20 answers via the persisted fingerprint,
 and any existing `ID Reporte` before writing tracking cells. It never rewrites answers. Neon is the
 source of truth; web report, PDF download, and email attachment all read the same hashed, stored
 `FinalReport`. The Sheet is a projection of status, not a second report store.

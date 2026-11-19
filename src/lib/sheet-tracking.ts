@@ -34,7 +34,7 @@ export function trackingCells(record: ReportRecord, schema: SheetSchema, timeZon
   put('reportStatus', 'Generado');
   put('emailStatus', EMAIL_LABELS[record.emailStatus]);
   put('pdfStatus', record.pdfDownloadedAt ? 'Descarga iniciada' : 'Pendiente');
-  put('generatedAt', date(record.createdAt));
+  put('generatedAt', date(new Date(record.report.generatedAt)));
   put('sentAt', date(record.emailAcceptedAt));
   put('pdfDownloadedAt', date(record.pdfDownloadedAt));
   put('lastError', escapeCell(cleanText(record.emailLastError ?? '', 200)));
@@ -79,7 +79,7 @@ export async function syncReportTracking(
       )
         throw new Error('Spreadsheet row answers do not match the persisted report');
       const currentId = String(row[schema.tracking.reportId] ?? '').trim();
-      if (currentId && currentId !== record.id)
+      if (currentId && currentId !== record.id && currentId !== `submission:${record.submissionId}`)
         throw new Error('Spreadsheet row belongs to a different report');
       const cells = trackingCells(record, schema, timeZone);
       if ((await gateway.writeCells(record.sheetRowNumber, cells)) !== cells.length)

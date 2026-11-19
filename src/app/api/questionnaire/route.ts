@@ -3,14 +3,17 @@ import { submissionSchema } from '@/lib/validation';
 import { saveSubmissionWithRow } from '@/lib/sheets';
 import { createGoogleSheetsGateway } from '@/lib/google-sheets-client';
 import { reportAccessToken } from '@/lib/final-report';
+import { submissionFingerprint } from '@/lib/final-report';
 import {
   GenerationInProgressError,
   RecipientLimitError,
+  SubmissionConflictError,
   createReport,
   deliverReportEmail,
   publicEmailStatus,
 } from '@/lib/pipeline';
 import { NO_STORE, getPipelineDeps, ipLimited, reportTokenSecret } from '@/lib/services';
+import { normalizeEmail } from '@/lib/sheets';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -62,12 +65,24 @@ export async function POST(req: Request) {
   const submission = parsed.data;
 
   // Step 1: the response row. Once Google confirms it, the lead can no longer be lost.
-  let sheetRowNumber: number;
+  let sheetRowNumber: number | undefined;
   let duplicate = false;
   try {
-    const saved = await saveSubmissionWithRow(gateway, submission);
-    duplicate = saved.status === 'duplicate';
-    sheetRowNumber = saved.rowNumber;
+    // A same-id retry after the ten-minute Sheet dedupe window must not append another row.
+    const prior = await deps.store.getBySubmissionId(submission.id);
+    if (prior) {
+      if (
+        prior.fingerprint !==
+        submissionFingerprint(normalizeEmail(submission.email), submission.answers)
+      )
+        return json({ ok: false, error: 'El identificador de envío ya está en uso.' }, 409);
+      duplicate = true;
+      sheetRowNumber = prior.sheetRowNumber ?? undefined;
+    } else {
+      const saved = await saveSubmissionWithRow(gateway, submission);
+      duplicate = saved.status === 'duplicate';
+      sheetRowNumber = saved.rowNumber;
+    }
   } catch (error) {
     // Log only a short message: Google client errors can embed request details.
     const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
@@ -120,6 +135,8 @@ export async function POST(req: Request) {
         429,
       );
     }
+    if (error instanceof SubmissionConflictError)
+      return json({ ok: false, error: 'El identificador de envío ya está en uso.' }, 409);
     console.error(
       '[questionnaire] report generation failed:',
       error instanceof Error ? error.message.slice(0, 200) : 'unknown',

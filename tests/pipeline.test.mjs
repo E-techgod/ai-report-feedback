@@ -7,6 +7,7 @@ import {
   createReport,
   deliverReportEmail,
   RecipientLimitError,
+  SubmissionConflictError,
   maskEmail,
   processDueEmails,
   publicEmailStatus,
@@ -60,6 +61,18 @@ test('a retry links its existing Neon report to the confirmed Sheet row', async 
   assert.equal(retry.created, false);
   assert.equal(retry.record.sheetRowNumber, 22);
   assert.equal(retry.record.id, first.record.id);
+  assert.equal(h.narrativeCalls.length, 1);
+});
+
+test('a reused submission id with different answers cannot access the stored report', async () => {
+  const h = harness({ emailEnabled: false });
+  const { deps } = await h.build();
+  const s = submission();
+  await createReport(deps, s);
+  await assert.rejects(
+    () => createReport(deps, { ...s, answers: answersOf(['A1']) }),
+    SubmissionConflictError,
+  );
   assert.equal(h.narrativeCalls.length, 1);
 });
 

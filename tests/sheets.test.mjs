@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { questionIds } from '../src/lib/questions.ts';
-import { parseSheetSchema } from '../src/lib/sheet-schema.ts';
+import { columnLetter, parseSheetSchema } from '../src/lib/sheet-schema.ts';
 import { buildRow, cleanText, escapeCell, saveSubmission, wallClock } from '../src/lib/sheets.ts';
 
 const HEADERS = [
@@ -74,7 +74,7 @@ function fakeGateway({
       if (confirm.updatedRows === 1) sheet.push(row);
       return {
         ...confirm,
-        updatedRange: `'Respuestas de formulario 1'!A${sheet.length}:${'AI'}${sheet.length}`,
+        updatedRange: `'Respuestas de formulario 1'!A${sheet.length}:${columnLetter(row.length - 1)}${sheet.length}`,
       };
     },
   };
@@ -88,7 +88,9 @@ test('row follows live headers and persists answers as Si/No', () => {
   assert.equal(row[SCHEMA.questions.A1], 'Si');
   assert.equal(row[SCHEMA.questions.A2], 'No');
   assert.equal(row[SCHEMA.questions.B10], 'Si');
-  assert.ok(row.slice(4, 15).every((v) => v === ''));
+  assert.equal(row[SCHEMA.tracking.reportStatus], 'Pendiente');
+  assert.equal(row[SCHEMA.tracking.reportId], `submission:${s.id}`);
+  assert.ok(row.slice(4, 15).every((v, i) => [0, 9].includes(i) || v === ''));
   assert.ok(row.slice(15).every((v) => v === 'Si' || v === 'No'));
 });
 
@@ -101,7 +103,7 @@ test('row follows reordered email and question headers without changing answer m
   assert.equal(row[schema.email], s.email);
   assert.equal(row[schema.questions.A6], 'Si');
   assert.equal(row[schema.questions.A1], 'No');
-  assert.equal(row[SCHEMA.tracking.reportId], '');
+  assert.equal(row[SCHEMA.tracking.reportId], `submission:${s.id}`);
 });
 
 test('email is lower-cased and text is stripped of control characters', () => {
@@ -157,6 +159,15 @@ test('same submission id retried is a duplicate and not written again', async ()
   const s = submission();
   assert.equal(await saveSubmission(g, s), 'created');
   assert.equal(await saveSubmission(g, s), 'duplicate');
+  assert.equal(g.calls.append, 1);
+});
+
+test('submission marker prevents a second row after the dedupe window', async () => {
+  const g = fakeGateway();
+  const s = submission();
+  const now = new Date('2026-11-18T19:00:00Z');
+  assert.equal(await saveSubmission(g, s, now), 'created');
+  assert.equal(await saveSubmission(g, s, new Date(now.getTime() + 20 * 60_000)), 'duplicate');
   assert.equal(g.calls.append, 1);
 });
 

@@ -108,6 +108,9 @@ export function buildRow(
   row[schema.firstName] = escapeCell(cleanText(submission.firstName, 100));
   row[schema.lastName] = escapeCell(cleanText(submission.lastName, 100));
   row[schema.email] = escapeCell(normalizeEmail(submission.email));
+  if (schema.tracking.reportStatus !== undefined) row[schema.tracking.reportStatus] = 'Pendiente';
+  if (schema.tracking.reportId !== undefined)
+    row[schema.tracking.reportId] = `submission:${submission.id}`;
   for (const id of questionIds) row[schema.questions[id]] = normalizeAnswer(submission.answers[id]);
   return row;
 }
@@ -164,6 +167,29 @@ async function writeOnce(
   now: Date,
 ): Promise<SheetSaveResult> {
   const schema = parseSheetSchema(await gateway.readHeaders());
+  if (
+    schema.tracking.reportId === undefined ||
+    schema.tracking.reportStatus === undefined ||
+    schema.tracking.emailStatus === undefined
+  )
+    throw new Error('Required report tracking headers are missing');
+  const markers = await gateway.readColumn(schema.tracking.reportId);
+  const marker = `submission:${submission.id}`;
+  const markedRow = markers.findIndex((value, index) => index > 0 && value === marker);
+  if (markedRow >= 0) {
+    const rowNumber = markedRow + 1;
+    const row = (await gateway.readRows([rowNumber], schema.headers.length))[0];
+    const matchingEmail =
+      normalizeEmail(String(row?.[schema.email] ?? '')) === normalizeEmail(submission.email);
+    const matchingAnswers = questionIds.every(
+      (id) =>
+        foldAnswer(row?.[schema.questions[id]]) ===
+        foldAnswer(normalizeAnswer(submission.answers[id])),
+    );
+    if (!matchingEmail || !matchingAnswers)
+      throw new Error('Submission marker does not match its spreadsheet row');
+    return { status: 'duplicate', rowNumber };
+  }
   const timeZone = await gateway.getTimeZone().catch(() => FALLBACK_TIME_ZONE);
   const { text, serial } = wallClock(now, timeZone);
   const existingRow = await hasRecentDuplicate(gateway, schema, submission, serial);

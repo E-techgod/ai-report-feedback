@@ -75,6 +75,9 @@ export class GenerationInProgressError extends Error {}
 /** Too many new reports requested for the same recipient address. */
 export class RecipientLimitError extends Error {}
 
+/** A client reused a submission id with different recipient or answers. */
+export class SubmissionConflictError extends Error {}
+
 /**
  * Creates (or returns the existing) finalized report for a submission.
  * Idempotent per submission id, and per person+answers inside the dedupe window.
@@ -86,9 +89,12 @@ export async function createReport(
 ): Promise<{ record: ReportRecord; created: boolean }> {
   const { store, config } = deps;
   const now = clock(deps);
+  const email = normalizeEmail(submission.email);
+  const fingerprint = submissionFingerprint(email, submission.answers);
 
   const byId = await store.getBySubmissionId(submission.id);
-  if (byId)
+  if (byId) {
+    if (byId.fingerprint !== fingerprint) throw new SubmissionConflictError();
     return {
       record:
         sheetRowNumber && !byId.sheetRowNumber
@@ -96,9 +102,7 @@ export async function createReport(
           : byId,
       created: false,
     };
-
-  const email = normalizeEmail(submission.email);
-  const fingerprint = submissionFingerprint(email, submission.answers);
+  }
   const since = new Date(now.getTime() - config.dedupeWindowMs);
   const recent = await store.findRecentByFingerprint(fingerprint, since);
   if (recent)

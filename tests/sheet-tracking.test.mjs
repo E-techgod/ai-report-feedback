@@ -65,6 +65,7 @@ async function setup({ totals = false, emailStatus = 'disabled' } = {}) {
 
 test('syncs the persisted report to only named tracking fields; repeated sync keeps counters stable', async () => {
   const ctx = await setup({ totals: true });
+  ctx.sheet[1][ctx.schema.tracking.reportId] = `submission:${ctx.record.submissionId}`;
   assert.equal(await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id), true);
   const row = ctx.sheet[1];
   assert.equal(row[ctx.schema.tracking.reportId], ctx.record.id);
