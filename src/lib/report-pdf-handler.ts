@@ -1,59 +1,80 @@
-import { z } from 'zod';
 import { NextResponse } from 'next/server';
-import { pdfFilename } from './email';
-import { verifyReportAccessToken } from './final-report';
-import { NO_STORE, ipLimited } from './services';
-import type { PipelineDeps } from './pipeline';
-import { safeError } from './store';
+import { verifyDownloadGrant } from './download-grant';
+import { finalReportSchema, deepFreeze, type FinalReport } from './final-report';
+import { NO_STORE } from './services';
 
-const fail = (status: number) => new NextResponse(null, { status, headers: NO_STORE });
+// A finalized report is ~10-15 KB of JSON; anything near this is not one.
+const MAX_BODY_BYTES = 100_000;
 
-/** Render the stored report; project download status to Sheets after the response. */
+const fail = (status: number, error: string) =>
+  NextResponse.json({ ok: false, error }, { status, headers: NO_STORE });
+
+export function pdfFilename(firstName: string): string {
+  const slug = firstName
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return `Diagnostico-Patrimonial-Quiron${slug ? `-${slug}` : ''}.pdf`;
+}
+
+/**
+ * Renders the PDF for a report the browser presents together with its download grant.
+ * Nothing is looked up or stored: the grant's signature covers the report's content hash and the
+ * expiry, so the server only has to verify it (any instance can) and render. The report travels
+ * in the POST body, never in a URL, and the response is not cacheable.
+ *   401 invalid/tampered grant or a report that does not match it
+ *   410 grant genuinely issued for this report, but past its 5-minute window
+ */
 export async function handlePdfDownload(
   req: Request,
-  id: string,
-  deps: PipelineDeps,
-  secret: string,
-  schedule: (task: () => Promise<void>) => void,
+  {
+    secret,
+    renderPdf,
+    now,
+  }: {
+    secret: string;
+    renderPdf: (report: FinalReport) => Promise<Buffer>;
+    now?: () => Date;
+  },
 ) {
-  const token = req.headers.get('x-report-token') ?? '';
-  if (!z.string().uuid().safeParse(id).success) return fail(404);
-  if (await ipLimited(deps.store, req, 'pdf', 20, 60)) return fail(429);
-  if (!verifyReportAccessToken(id, token, secret)) return fail(404);
+  const raw = await req.text();
+  if (raw.length > MAX_BODY_BYTES) return fail(413, 'Solicitud demasiado grande.');
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return fail(400, 'Solicitud inválida.');
+  }
+  const parsed = finalReportSchema.safeParse(body);
+  if (!parsed.success) return fail(400, 'Solicitud inválida.');
+  const report = deepFreeze(parsed.data);
 
-  const record = await deps.store.getById(id);
-  if (!record) return fail(404);
+  const check = verifyDownloadGrant(
+    report,
+    req.headers.get('x-download-token') ?? '',
+    secret,
+    now?.(),
+  );
+  if (check === 'expired') return fail(410, 'Tu sesión de descarga ha expirado.');
+  if (check !== 'ok') return fail(401, 'Descarga no autorizada.');
+
   let pdf: Buffer;
   try {
-    pdf = await deps.renderPdf(record.report);
+    pdf = await renderPdf(report);
   } catch (error) {
-    // Named log line (no report content) so a runtime packaging/render failure is diagnosable
-    // from the function logs; nothing is recorded as downloaded.
-    console.error(`[pdf] report ${id}: render-failed: ${safeError(error)}`);
-    return fail(500);
+    // Named log line (no report content) so a runtime packaging/render failure is diagnosable.
+    console.error(
+      `[pdf] render-failed: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown'}`,
+    );
+    return fail(500, 'No se pudo generar el PDF.');
   }
-  try {
-    // Persist the event before returning; Sheets remains an asynchronous projection.
-    await deps.store.markPdfDownloaded(id, new Date());
-  } catch {
-    console.error(`[tracking] report ${id}: pdf-status-failed`);
-  }
-
-  const response = new NextResponse(new Uint8Array(pdf), {
+  return new NextResponse(new Uint8Array(pdf), {
     status: 200,
     headers: {
       ...NO_STORE,
       'content-type': 'application/pdf',
-      'content-disposition': `attachment; filename="${pdfFilename(record.report.firstName)}"`,
+      'content-disposition': `attachment; filename="${pdfFilename(report.firstName)}"`,
     },
   });
-  if (deps.syncTracking)
-    schedule(async () => {
-      try {
-        await deps.syncTracking?.(id, 8_000);
-      } catch {
-        console.error(`[tracking] report ${id}: sync-failed`);
-      }
-    });
-  return response;
 }

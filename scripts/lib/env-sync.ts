@@ -40,29 +40,22 @@ export const SYNC_DEFAULT = [
   'GOOGLE_PRIVATE_KEY',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_MODEL',
-  'RESEND_API_KEY',
-  'RESEND_WEBHOOK_SECRET',
-  'EMAIL_FROM',
-  'EMAIL_REPLY_TO',
-  'APP_URL',
   'NEXT_PUBLIC_BOOKING_URL',
 ] as const;
 
 /**
- * Opt-in only. Replacing either one changes live behaviour, so they are never part of a default run:
- * they must be named with `--only` AND `--allow-secret-rotation`, and the confirmation phrase changes.
+ * Opt-in only. Replacing it changes live behaviour, so it is never part of a default run:
+ * it must be named with `--only` AND `--allow-secret-rotation`, and the confirmation phrase changes.
  */
-export const SYNC_OPT_IN = ['REPORT_TOKEN_SECRET', 'CRON_SECRET'] as const;
+export const SYNC_OPT_IN = ['REPORT_TOKEN_SECRET'] as const;
 
 /** Names approved for updates or explicit secret rotation. New names can be approved for creation. */
 export const SYNC_ALLOWLIST = [...SYNC_DEFAULT, ...SYNC_OPT_IN] as const;
 
 /**
  * Deliberately NOT synchronized (a request to sync one of these is rejected):
- *  - REPORT_EMAIL_ENABLED: the master email switch is flipped on purpose in the Vercel dashboard,
- *    never as a side effect of copying a local file;
- *  - DATABASE_URL / DATABASE_URL_UNPOOLED: owned by the Neon integration, and the local value may
- *    point at a different branch;
+ *  - retired Neon / Resend / cron variables (the app no longer reads them). Stale values in a local
+ *    .env must never be pushed or proposed again; existing Vercel variables are NOT deleted here;
  *  - the legacy GOOGLE_SHEETS_WEBHOOK_* variables.
  */
 export const NEVER_SYNCED = [
@@ -70,6 +63,12 @@ export const NEVER_SYNCED = [
   'REPORT_EMAIL_ALLOWLIST',
   'DATABASE_URL',
   'DATABASE_URL_UNPOOLED',
+  'RESEND_API_KEY',
+  'RESEND_WEBHOOK_SECRET',
+  'EMAIL_FROM',
+  'EMAIL_REPLY_TO',
+  'APP_URL',
+  'CRON_SECRET',
   'GOOGLE_SHEETS_WEBHOOK_URL',
   'GOOGLE_SHEETS_WEBHOOK_SECRET',
 ] as const;
@@ -85,10 +84,7 @@ export function variableTypeForCreate(name: string): 'config' | 'secret' {
 
 const OPT_IN_WARNINGS: Record<string, string> = {
   REPORT_TOKEN_SECRET:
-    'signs every report access token: replacing it INVALIDATES all previously issued report links and downloads',
-  CRON_SECRET:
-    'Vercel sends the project CRON_SECRET as the bearer to /api/cron/*, so there is no separate cron setting; ' +
-    'the new value applies from the next deployment and the cron endpoint rejects any other bearer',
+    'signs every PDF download grant: replacing it INVALIDATES all download windows that are still open (5 minutes at most)',
 };
 
 const PLAN_NOTES: Record<string, string> = {
@@ -402,7 +398,7 @@ export function selectNames(
   if (!only || only.length === 0) {
     if (allowRotation)
       throw new Error(
-        '--allow-secret-rotation needs --only naming REPORT_TOKEN_SECRET and/or CRON_SECRET',
+        '--allow-secret-rotation needs --only naming REPORT_TOKEN_SECRET',
       );
     return [...SYNC_DEFAULT];
   }
@@ -417,7 +413,7 @@ export function selectNames(
     );
   if (allowRotation && rotating.length === 0)
     throw new Error(
-      '--allow-secret-rotation needs --only naming REPORT_TOKEN_SECRET and/or CRON_SECRET',
+      '--allow-secret-rotation needs --only naming REPORT_TOKEN_SECRET',
     );
   return names;
 }
@@ -796,7 +792,7 @@ export type SyncOptions = {
   only?: string[];
   /** Explicitly approve local names outside the fixed allowlist for creation only. */
   approveNew?: string[];
-  /** Required to touch REPORT_TOKEN_SECRET / CRON_SECRET (together with naming them in `only`). */
+  /** Required to touch REPORT_TOKEN_SECRET (together with naming it in `only`). */
   allowRotation?: boolean;
   /** Apply requires the projectId the operator expects; it must equal the resolved link. */
   expectProject?: string;

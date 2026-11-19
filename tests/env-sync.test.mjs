@@ -73,11 +73,30 @@ function harness(ws, extra = {}, envExtra = {}) {
 
 // ----------------------------------------------------------------------------------- allowlist
 
+const RETIRED = [
+  'RESEND_API_KEY',
+  'RESEND_WEBHOOK_SECRET',
+  'EMAIL_FROM',
+  'EMAIL_REPLY_TO',
+  'APP_URL',
+  'CRON_SECRET',
+  'DATABASE_URL',
+  'DATABASE_URL_UNPOOLED',
+  'REPORT_EMAIL_ENABLED',
+  'REPORT_EMAIL_ALLOWLIST',
+];
+
 test('default sync excludes the opt-in secrets; the allowlist never contains forbidden names', () => {
   for (const name of NEVER_SYNCED) assert.ok(!SYNC_ALLOWLIST.includes(name), name);
   for (const name of SYNC_OPT_IN) assert.ok(!SYNC_DEFAULT.includes(name), name);
-  assert.deepEqual([...SYNC_OPT_IN].sort(), ['CRON_SECRET', 'REPORT_TOKEN_SECRET']);
+  assert.deepEqual([...SYNC_OPT_IN], ['REPORT_TOKEN_SECRET']);
   assert.ok(NEVER_SYNCED.includes('REPORT_EMAIL_ENABLED'));
+  // Retired Neon / Resend / cron names are neither synced nor proposed again.
+  for (const name of RETIRED) {
+    assert.ok(!SYNC_ALLOWLIST.includes(name), name);
+    assert.ok(NEVER_SYNCED.includes(name), name);
+    assert.equal(isNewVariableCandidate(name), false, name);
+  }
   assert.deepEqual(selectNames(undefined), [...SYNC_DEFAULT]);
   assert.ok(!selectNames(undefined).includes('REPORT_TOKEN_SECRET'));
   assert.ok(!selectNames(undefined).includes('CRON_SECRET'));
@@ -191,24 +210,21 @@ test('post-write proof requires an independent Preview record and unchanged Prod
 });
 
 test('forbidden names are rejected even with the rotation flag', () => {
-  for (const name of [
-    'REPORT_EMAIL_ENABLED',
-    'DATABASE_URL',
-    'DATABASE_URL_UNPOOLED',
-    'GOOGLE_SHEETS_WEBHOOK_URL',
-  ])
+  for (const name of [...RETIRED, 'GOOGLE_SHEETS_WEBHOOK_URL'])
     for (const allow of [false, true])
       assert.throws(() => selectNames([name], allow), /Not in the sync allowlist/, name);
 });
 
 test('opt-in secrets need both --only and the rotation flag, and the flag needs an opt-in name', () => {
-  assert.throws(() => selectNames(['CRON_SECRET']), /opt-in.*--allow-secret-rotation/);
-  assert.throws(() => selectNames(['EMAIL_FROM', 'REPORT_TOKEN_SECRET']), /opt-in/);
+  assert.throws(() => selectNames(['REPORT_TOKEN_SECRET']), /opt-in.*--allow-secret-rotation/);
+  assert.throws(() => selectNames(['ANTHROPIC_API_KEY', 'REPORT_TOKEN_SECRET']), /opt-in/);
   assert.throws(() => selectNames(undefined, true), /needs --only naming/);
-  assert.throws(() => selectNames(['EMAIL_FROM'], true), /needs --only naming/);
-  assert.deepEqual(selectNames(['CRON_SECRET', 'CRON_SECRET'], true), ['CRON_SECRET']);
-  assert.deepEqual(selectNames(['EMAIL_FROM', 'REPORT_TOKEN_SECRET'], true), [
-    'EMAIL_FROM',
+  assert.throws(() => selectNames(['ANTHROPIC_API_KEY'], true), /needs --only naming/);
+  assert.deepEqual(selectNames(['REPORT_TOKEN_SECRET', 'REPORT_TOKEN_SECRET'], true), [
+    'REPORT_TOKEN_SECRET',
+  ]);
+  assert.deepEqual(selectNames(['ANTHROPIC_API_KEY', 'REPORT_TOKEN_SECRET'], true), [
+    'ANTHROPIC_API_KEY',
     'REPORT_TOKEN_SECRET',
   ]);
 });
@@ -304,25 +320,30 @@ test('the plan has names and operations only, and marks blocked and unverified v
   const local = {
     ANTHROPIC_API_KEY: SECRET_A,
     GOOGLE_SHEET_ID: 'sheet',
-    EMAIL_FROM: '  ',
-    APP_URL: 'u',
+    ANTHROPIC_MODEL: '  ',
+    NEXT_PUBLIC_BOOKING_URL: 'u',
+    EMAIL_FROM: 'retired@example.com',
   };
   const list = stateOf([
     { key: 'GOOGLE_SHEET_ID', target: ['production'] },
-    { key: 'APP_URL', target: ['production', 'preview'] },
+    { key: 'NEXT_PUBLIC_BOOKING_URL', target: ['production', 'preview'] },
     { key: 'DATABASE_URL', target: ['production'] },
   ]);
   const plan = buildPlan(local, list);
   const op = Object.fromEntries(plan.map((item) => [item.name, item.operation]));
   assert.equal(op.ANTHROPIC_API_KEY, 'create');
   assert.equal(op.GOOGLE_SHEET_ID, 'update');
-  assert.equal(op.APP_URL, 'blocked');
-  assert.equal(op.EMAIL_FROM, 'skip');
-  assert.equal(op.RESEND_API_KEY, 'skip');
+  assert.equal(op.NEXT_PUBLIC_BOOKING_URL, 'blocked');
+  assert.equal(op.ANTHROPIC_MODEL, 'skip');
+  assert.equal(op.GOOGLE_CLIENT_EMAIL, 'skip');
+  assert.equal(op.EMAIL_FROM, undefined, 'retired names are never planned');
   assert.doesNotMatch(JSON.stringify(plan), new RegExp(SECRET_A));
   const unverified = buildPlan(local, { ok: false, reason: 'x' });
   assert.equal(unverified.find((i) => i.name === 'ANTHROPIC_API_KEY').operation, 'upsert');
-  assert.equal(buildPlan(local, null).find((i) => i.name === 'APP_URL').operation, 'upsert');
+  assert.equal(
+    buildPlan(local, null).find((i) => i.name === 'NEXT_PUBLIC_BOOKING_URL').operation,
+    'upsert',
+  );
 });
 
 // ------------------------------------------------------------------------------------ redaction
@@ -438,7 +459,7 @@ test('dry run prints the project and names, never values, and only reads', async
   assert.match(output, new RegExp(`projectId=${IDS.projectId} orgId=${IDS.orgId}`));
   assert.match(output, /update\s+ANTHROPIC_API_KEY/);
   assert.match(output, /create\s+GOOGLE_PRIVATE_KEY/);
-  assert.match(output, /skip\s+EMAIL_FROM/);
+  assert.doesNotMatch(output, /EMAIL_FROM|RESEND|CRON_SECRET/, 'retired names are not planned');
   assert.match(output, /DRY RUN/);
   assertNoSecrets(assert, output);
   assert.deepEqual(verbs(ws), ['env ls', `api ${customEnvironmentsArgs(IDS.projectId)[1]}`]); // reads only: listing + custom environments
@@ -496,7 +517,7 @@ test('approval cannot overwrite an existing or protected variable', async () => 
   assert.equal(existing.asked.length, 0);
   assert.equal(addCalls(ws).length, 0);
 
-  for (const name of ['DATABASE_URL', 'REPORT_EMAIL_ENABLED', 'CRON_SECRET', 'VERCEL_TOKEN']) {
+  for (const name of [...RETIRED, 'VERCEL_TOKEN']) {
     const invalid = harness(ws, { approveNew: [name] });
     await assert.rejects(runSync(invalid.options), /not an eligible nonempty local variable/);
   }
@@ -600,7 +621,7 @@ test('apply is refused entirely when ANY variable is ambiguous (fail closed, no 
   const ws = workspace();
   const records = JSON.stringify([
     { key: 'ANTHROPIC_API_KEY', target: ['production', 'preview', 'development'] },
-    { key: 'RESEND_WEBHOOK_SECRET', target: ['production'] },
+    { key: 'ANTHROPIC_MODEL', target: ['production'] },
   ]);
   const h = harness(ws, {}, { FAKE_RECORDS: records });
   await assert.rejects(runSync(h.options), /Refusing to apply: ANTHROPIC_API_KEY ambiguous/);
@@ -619,7 +640,7 @@ test('apply sends values on stdin only, pins the project, and touches nothing el
   const adds = addCalls(ws);
   assert.deepEqual(
     adds.map((c) => c.argv[2]),
-    ['GOOGLE_PRIVATE_KEY', 'ANTHROPIC_API_KEY', 'RESEND_WEBHOOK_SECRET'],
+    ['GOOGLE_PRIVATE_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'],
   );
   for (const call of adds) {
     // only the pre-existing, proven Production-only variable is overwritten with --force
@@ -683,21 +704,17 @@ test('declining the confirmation leaves Production untouched', async () => {
 
 test('rotating secrets is opt-in, warned about, and needs a different confirmation phrase', async () => {
   const ws = workspace();
-  const h = harness(ws, { only: ['REPORT_TOKEN_SECRET', 'CRON_SECRET'], allowRotation: true });
+  const h = harness(ws, { only: ['REPORT_TOKEN_SECRET'], allowRotation: true });
   const result = await runSync(h.options);
   const output = h.lines.join('\n');
-  assert.deepEqual(result.applied, ['REPORT_TOKEN_SECRET', 'CRON_SECRET']);
-  assert.match(
-    output,
-    /WARNING REPORT_TOKEN_SECRET: .*INVALIDATES all previously issued report links/,
-  );
-  assert.match(output, /WARNING CRON_SECRET: .*no separate cron setting/);
+  assert.deepEqual(result.applied, ['REPORT_TOKEN_SECRET']);
+  assert.match(output, /WARNING REPORT_TOKEN_SECRET: .*INVALIDATES all download windows/);
   assert.equal(h.asked[0].phrase, PHRASE_ROTATION);
   assert.match(h.asked[0].summary, /SECRETS THAT CHANGE LIVE BEHAVIOUR/);
   assertNoSecrets(assert, output);
   assert.deepEqual(
     addCalls(ws).map((c) => c.argv[2]),
-    ['REPORT_TOKEN_SECRET', 'CRON_SECRET'],
+    ['REPORT_TOKEN_SECRET'],
   );
 });
 
@@ -911,7 +928,7 @@ test('B1: a create never passes --force; only a proven Production-only update do
   assert.deepEqual(withAdds(ws), [
     ['GOOGLE_PRIVATE_KEY', false],
     ['ANTHROPIC_API_KEY', true],
-    ['RESEND_WEBHOOK_SECRET', false],
+    ['ANTHROPIC_MODEL', false],
   ]);
 });
 
@@ -1093,15 +1110,12 @@ test('the preserved safeguards still hold with the new reads', async () => {
   const ws = workspace();
   const h = harness(
     ws,
-    { ...only(['CRON_SECRET', 'REPORT_TOKEN_SECRET']), allowRotation: true },
-    { FAKE_EXISTING: 'CRON_SECRET' },
+    { ...only(['REPORT_TOKEN_SECRET']), allowRotation: true },
+    { FAKE_EXISTING: 'REPORT_TOKEN_SECRET' },
   );
   await runSync(h.options);
   assert.equal(h.asked[0].phrase, PHRASE_ROTATION);
-  assert.deepEqual(withAdds(ws), [
-    ['CRON_SECRET', true],
-    ['REPORT_TOKEN_SECRET', false],
-  ]);
+  assert.deepEqual(withAdds(ws), [['REPORT_TOKEN_SECRET', true]]);
   for (const name of NEVER_SYNCED)
     assert.throws(() => lib.selectNames?.([name]) ?? selectNames([name]), /allowlist/, name);
   for (const call of calls(ws)) assert.ok(!call.argv.includes('rm'));

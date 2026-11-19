@@ -10,7 +10,7 @@ import {
 } from '../src/lib/ai-share.ts';
 import { buildFinalReport } from '../src/lib/final-report.ts';
 import { generateNarrative } from '../src/lib/narrative.ts';
-import { createReport, deliverReportEmail } from '../src/lib/pipeline.ts';
+import { generateReport } from '../src/lib/generate-report.ts';
 import {
   MAX_CONTEXT_WORDS,
   MAX_SUMMARY_WORDS,
@@ -18,7 +18,7 @@ import {
   fallbackNarrative,
 } from '../src/lib/report.ts';
 import { questionIds } from '../src/lib/questions.ts';
-import { harness, submission } from './helpers/pipeline-harness.mjs';
+import { reportDeps, submission } from './helpers/flow-harness.mjs';
 
 /** Answers with exactly `noCount` "No" answers, spread to give 0..3 priorities. */
 const answersWith = (noCount) => Object.fromEntries(questionIds.map((id, i) => [id, i >= noCount]));
@@ -80,29 +80,24 @@ test('template text is never counted as AI text', () => {
   assert.equal(exceedsAiShare(report), false);
 });
 
-test('an oversized AI narrative is replaced by template text; one report, one email', async () => {
-  const h = harness({
+test('an oversized AI narrative is replaced by template text', async () => {
+  const h = reportDeps({
     narrative: async (model) => ({
       narrative: narrativeOf(model, MAX_SUMMARY_WORDS, MAX_CONTEXT_WORDS),
       source: 'ai',
       failureReason: null,
     }),
   });
-  const { deps } = await h.build();
-  const { record } = await createReport(deps, submission({ answers: answersWith(6) }));
+  const report = await generateReport(h.deps, submission({ answers: answersWith(6) }));
   const model = buildReportModel(answersWith(6));
-  assert.equal(record.report.narrativeSource, 'template');
-  assert.equal(record.report.aiFailureReason, 'ai-share-exceeded');
-  assert.deepEqual(record.report.narrative, fallbackNarrative(model));
-  assert.equal(record.emailStatus, 'pending');
-  await deliverReportEmail(deps, record.id);
-  await deliverReportEmail(deps, record.id);
-  assert.equal(h.sent.length, 1);
+  assert.equal(report.narrativeSource, 'template');
+  assert.equal(report.aiFailureReason, 'ai-share-exceeded');
+  assert.deepEqual(report.narrative, fallbackNarrative(model));
 });
 
 test('a narrative at the derived limits is kept as AI text', async () => {
   const answers = answersWith(6);
-  const h = harness({
+  const h = reportDeps({
     narrative: async (model) => {
       const limits = aiWordLimits(model);
       return {
@@ -112,11 +107,10 @@ test('a narrative at the derived limits is kept as AI text', async () => {
       };
     },
   });
-  const { deps } = await h.build();
-  const { record } = await createReport(deps, submission({ answers }));
-  assert.equal(record.report.narrativeSource, 'ai');
-  assert.equal(record.report.aiFailureReason, null);
-  assert.ok(aiShare(record.report) <= MAX_AI_SHARE);
+  const report = await generateReport(h.deps, submission({ answers }));
+  assert.equal(report.narrativeSource, 'ai');
+  assert.equal(report.aiFailureReason, null);
+  assert.ok(aiShare(report) <= MAX_AI_SHARE);
 });
 
 test('the provider is told the derived limit and an answer inside it is accepted end to end', async () => {

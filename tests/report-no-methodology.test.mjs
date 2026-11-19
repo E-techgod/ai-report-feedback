@@ -3,14 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { extractText, getDocumentProxy } from 'unpdf';
-import { buildEmail } from '../src/lib/email.ts';
 import { renderReportPdf } from '../src/lib/pdf/ReportPdf.tsx';
 import { buildReportContent, flattenContent } from '../src/lib/report-content.ts';
 import { questionIds } from '../src/lib/questions.ts';
 import { sampleReport, SAMPLE_YES } from './helpers/fixtures.mjs';
 
 /**
- * The client-facing report (web, PDF, email) has no "Cómo se elaboró este reporte" section, no
+ * The client-facing report (web, PDF) has no "Cómo se elaboró este reporte" section, no
  * AI-allocation percentages and no provider names. The legal disclaimer stays exactly as approved.
  * (The internal team view, mode="team", keeps its review annotations: it is not client-facing.)
  */
@@ -70,7 +69,7 @@ const variants = {
 };
 
 for (const [name, opts] of Object.entries(variants)) {
-  test(`no methodology section in the content, web, PDF or email (${name})`, async () => {
+  test(`no methodology section in the content, web or PDF (${name})`, async () => {
     const report = sampleReport(opts);
     const content = buildReportContent(report);
 
@@ -84,10 +83,6 @@ for (const [name, opts] of Object.entries(variants)) {
     const pdf = await pdfText(report);
     assertClean(pdf, 'pdf');
     assert.ok(norm(pdf).includes(norm(LEGAL)), 'pdf keeps the legal disclaimer exactly');
-
-    const email = buildEmail(report);
-    assertClean(plain(email.html), 'email html');
-    assertClean(email.text, 'email text');
   });
 }
 

@@ -168,7 +168,7 @@ export function workspace({ link = true, ids = IDS, extraEnv = [] } = {}) {
     [
       `ANTHROPIC_API_KEY=${SECRET_A}`,
       `GOOGLE_PRIVATE_KEY="${SECRET_KEY.trim().replace(/\n/g, '\\n')}"`,
-      `RESEND_WEBHOOK_SECRET=${SECRET_WEBHOOK}`,
+      `ANTHROPIC_MODEL=${SECRET_WEBHOOK}`,
       `CRON_SECRET=${SECRET_CRON}`,
       `REPORT_TOKEN_SECRET=${SECRET_TOKEN}`,
       'EMAIL_FROM=',

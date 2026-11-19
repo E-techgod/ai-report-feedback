@@ -2,7 +2,6 @@
 import Image from 'next/image';
 import { createContext, useContext, useEffect, useState } from 'react';
 import type { FinalReport } from '@/lib/final-report';
-import type { PublicEmailState } from '@/lib/pipeline';
 import { SECTION_NAV, buildReportContent, type AreaContent } from '@/lib/report-content';
 import { MAX_CONTEXT_WORDS, MAX_SUMMARY_WORDS } from '@/lib/report';
 import s from './ReportView.module.css';
@@ -18,15 +17,26 @@ import s from './ReportView.module.css';
  * `mode="team"` adds the prototype's review annotations (source tags, AI/rules mix panel).
  * Customers always get `mode="client"` (the default).
  */
-export type EmailStatusView = { state: PublicEmailState; to: string };
+/** Download grant issued with the report (see src/lib/download-grant.ts). */
+export type PdfDownload = { token: string; expiresInMs: number };
+
+export const DOWNLOAD_COPY = {
+  window: 'Podrás descargar tu PDF durante 5 minutos después de enviar tu diagnóstico.',
+  remaining: (mmss: string) => `Tiempo restante: ${mmss}`,
+  expired: 'Tu sesión de descarga ha expirado.',
+  failed: 'No se pudo descargar el PDF. Intenta nuevamente.',
+} as const;
+
+function formatRemaining(ms: number) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
 
 type ReportViewProps = {
   report: FinalReport;
   mode?: 'client' | 'team';
-  /** Server PDF endpoint + access token. Without it (dev preview) the browser print dialog is used. */
-  pdf?: { url: string; token: string } | null;
-  /** Real delivery state of the report email; null/undefined hides the line. */
-  email?: EmailStatusView | null;
+  /** 5-minute download grant. Without it (dev preview) the browser print dialog is used. */
+  pdf?: PdfDownload | null;
 };
 
 const cx = (...names: Array<string | false | undefined>) => names.filter(Boolean).join(' ');
@@ -126,38 +136,7 @@ function SectionHeader({ num, title, sub }: { num: string; title: string; sub: s
   );
 }
 
-/** What the customer is told about the email, from the REAL delivery state. */
-function emailMessage(email: EmailStatusView): { text: string; tone: 'ok' | 'wait' | 'error' } {
-  switch (email.state) {
-    case 'sending':
-      return { text: `Enviando tu informe a ${email.to}…`, tone: 'wait' };
-    case 'retrying':
-      return {
-        text: 'No pudimos enviar el correo todavía. Lo reintentaremos automáticamente; mientras tanto puedes descargar tu informe en PDF aquí.',
-        tone: 'wait',
-      };
-    case 'sent':
-    case 'delivered':
-      return { text: `Informe enviado a ${email.to}`, tone: 'ok' };
-    case 'bounced':
-      return {
-        text: `No se pudo entregar el correo a ${email.to}. Descarga tu informe en PDF aquí.`,
-        tone: 'error',
-      };
-    default:
-      return {
-        text: 'No se pudo enviar el correo. Descarga tu informe en PDF aquí.',
-        tone: 'error',
-      };
-  }
-}
-
-export default function ReportView({
-  report,
-  mode = 'client',
-  pdf = null,
-  email = null,
-}: ReportViewProps) {
+export default function ReportView({ report, mode = 'client', pdf = null }: ReportViewProps) {
   const team = mode === 'team';
   const c = buildReportContent(report);
   const aiUsed = report.narrativeSource === 'ai';
@@ -165,6 +144,10 @@ export default function ReportView({
   const [activeId, setActiveId] = useState('resumen');
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfError, setPdfError] = useState(false);
+  // Display only: the server enforces the real expiry (a signed deadline inside the token).
+  const [remainingMs, setRemainingMs] = useState<number | null>(pdf ? pdf.expiresInMs : null);
+  const [refused, setRefused] = useState(false);
+  const expired = refused || (remainingMs !== null && remainingMs <= 0);
 
   // Highlight the current section in the left navigation.
   useEffect(() => {
@@ -179,17 +162,44 @@ export default function ReportView({
     return () => observer.disconnect();
   }, []);
 
+  // Counts down from the window the server reported, so a wrong device clock cannot change it.
+  const grantToken = pdf?.token;
+  const windowMs = pdf?.expiresInMs;
+  useEffect(() => {
+    if (windowMs === undefined) return;
+    const deadline = Date.now() + windowMs;
+    const tick = () => {
+      const left = deadline - Date.now();
+      setRemainingMs(left);
+      if (left <= 0) clearInterval(timer);
+    };
+    const timer = setInterval(tick, 1000);
+    tick();
+    return () => clearInterval(timer);
+  }, [grantToken, windowMs]);
+
   async function downloadPdf() {
     if (!pdf) {
-      // Development preview only: no stored report exists, so print the page instead.
+      // Development preview only: there is no download grant, so print the page instead.
       window.print();
       return;
     }
+    if (expired) return;
     setPdfBusy(true);
     setPdfError(false);
     try {
-      // The PDF is rendered on the server from the stored finalized report.
-      const response = await fetch(pdf.url, { headers: { 'x-report-token': pdf.token } });
+      // Nothing is stored server-side: the report and its signed grant are sent back, the server
+      // verifies the grant (including its 5-minute expiry) and renders the PDF.
+      const response = await fetch('/api/report/pdf', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-download-token': pdf.token },
+        body: JSON.stringify(report),
+        cache: 'no-store',
+      });
+      if (response.status === 410) {
+        setRefused(true);
+        return;
+      }
       if (!response.ok) throw new Error('pdf');
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement('a');
@@ -204,30 +214,31 @@ export default function ReportView({
     }
   }
 
-  const emailInfo = email && email.state !== 'off' ? emailMessage(email) : null;
-
   return (
     <ViewContext.Provider value={{ team, aiUsed }}>
       <div className={s.root}>
         <div className={s.actionbar}>
-          {emailInfo && (
+          {pdf && (
             <span
-              className={cx(
-                s.emailStatus,
-                emailInfo.tone === 'ok' && s.emailOk,
-                emailInfo.tone === 'error' && s.emailError,
-              )}
-              role="status"
+              className={cx(s.emailStatus, expired && s.emailError)}
+              role={expired ? 'alert' : 'timer'}
             >
-              {emailInfo.text}
+              {expired
+                ? DOWNLOAD_COPY.expired
+                : `${DOWNLOAD_COPY.window} ${DOWNLOAD_COPY.remaining(formatRemaining(remainingMs ?? pdf.expiresInMs))}`}
             </span>
           )}
-          {pdfError && (
+          {pdfError && !expired && (
             <span className={cx(s.emailStatus, s.emailError)} role="alert">
-              No se pudo descargar el PDF. Intenta nuevamente.
+              {DOWNLOAD_COPY.failed}
             </span>
           )}
-          <button type="button" className={s.pdfButton} onClick={downloadPdf} disabled={pdfBusy}>
+          <button
+            type="button"
+            className={s.pdfButton}
+            onClick={downloadPdf}
+            disabled={pdfBusy || expired}
+          >
             {pdfBusy ? 'Preparando PDF…' : 'Descargar PDF ↓'}
           </button>
         </div>

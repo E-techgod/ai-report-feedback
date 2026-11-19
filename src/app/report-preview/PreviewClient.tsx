@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import ReportView, { type EmailStatusView } from '@/components/ReportView';
+import ReportView, { type PdfDownload } from '@/components/ReportView';
 import { getBookingUrl } from '@/lib/booking';
 import type { FinalReport } from '@/lib/final-report';
 import { questions } from '@/lib/questions';
@@ -18,13 +18,11 @@ const PRESETS = [
   { label: '100% · Excelente', yes: questions.map((q) => q.id) },
 ];
 
-const EMAIL_STATES: Array<{ label: string; value: EmailStatusView | null }> = [
-  { label: 'Correo: sin línea', value: null },
-  { label: 'Correo: enviando', value: { state: 'sending', to: 'a••@ejemplo.com' } },
-  { label: 'Correo: reintentando', value: { state: 'retrying', to: 'a••@ejemplo.com' } },
-  { label: 'Correo: enviado', value: { state: 'sent', to: 'a••@ejemplo.com' } },
-  { label: 'Correo: rebotó', value: { state: 'bounced', to: 'a••@ejemplo.com' } },
-  { label: 'Correo: falló', value: { state: 'failed', to: 'a••@ejemplo.com' } },
+/** Download-window states for the PDF button (the preview token is fake: the server would refuse it). */
+const DOWNLOAD_STATES: Array<{ label: string; value: PdfDownload | null }> = [
+  { label: 'Descarga: vista previa (imprimir)', value: null },
+  { label: 'Descarga: ventana de 5 min', value: { token: 'preview', expiresInMs: 300_000 } },
+  { label: 'Descarga: expira en 4 s', value: { token: 'preview', expiresInMs: 4_000 } },
 ];
 
 const SAMPLE_AI_SUMMARY =
@@ -34,15 +32,15 @@ export default function PreviewClient() {
   const [preset, setPreset] = useState(0);
   const [team, setTeam] = useState(true);
   const [simulateAi, setSimulateAi] = useState(false);
-  const [emailIdx, setEmailIdx] = useState(0);
+  const [downloadIdx, setDownloadIdx] = useState(0);
 
   // Optional URL parameters, e.g. /report-preview?view=client&ai=1&preset=2
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     if (q.get('view') === 'client') setTeam(false);
     if (q.get('ai') === '1') setSimulateAi(true);
-    const e = Number(q.get('email'));
-    if (Number.isInteger(e) && e >= 0 && e < EMAIL_STATES.length) setEmailIdx(e);
+    const d = Number(q.get('download'));
+    if (Number.isInteger(d) && d >= 0 && d < DOWNLOAD_STATES.length) setDownloadIdx(d);
     const n = Number(q.get('preset'));
     if (Number.isInteger(n) && n >= 0 && n < PRESETS.length) setPreset(n);
   }, []);
@@ -76,9 +74,9 @@ export default function PreviewClient() {
   }, [preset, simulateAi]);
 
   const btn = (on: boolean) => ({
-    border: '1px solid #1b6246',
-    background: on ? '#143b2c' : '#fff',
-    color: on ? '#fff' : '#143b2c',
+    border: '1px solid var(--color-border)',
+    background: on ? 'var(--color-accent)' : 'var(--color-background)',
+    color: 'var(--color-text)',
     borderRadius: 8,
     padding: '7px 12px',
     font: 'inherit',
@@ -87,7 +85,7 @@ export default function PreviewClient() {
   });
 
   return (
-    <div style={{ background: '#f4f3ee', minHeight: '100vh' }}>
+    <div style={{ background: 'var(--color-background)', minHeight: '100vh' }}>
       <div
         className="preview-controls"
         style={{
@@ -95,10 +93,12 @@ export default function PreviewClient() {
           gap: 8,
           flexWrap: 'wrap',
           padding: '12px 16px',
-          background: '#102b21',
+          background: 'var(--color-surface)',
         }}
       >
-        <strong style={{ color: '#d9f5e3', fontSize: 12, alignSelf: 'center', marginRight: 8 }}>
+        <strong
+          style={{ color: 'var(--color-text)', fontSize: 12, alignSelf: 'center', marginRight: 8 }}
+        >
           VISTA PREVIA (solo desarrollo)
         </strong>
         {PRESETS.map((p, i) => (
@@ -113,16 +113,18 @@ export default function PreviewClient() {
           {simulateAi ? 'Texto IA simulado' : 'Texto de plantilla'}
         </button>
         <button
-          style={btn(emailIdx > 0)}
-          onClick={() => setEmailIdx((emailIdx + 1) % EMAIL_STATES.length)}
+          style={btn(downloadIdx > 0)}
+          onClick={() => setDownloadIdx((downloadIdx + 1) % DOWNLOAD_STATES.length)}
         >
-          {EMAIL_STATES[emailIdx].label}
+          {DOWNLOAD_STATES[downloadIdx].label}
         </button>
       </div>
       <ReportView
+        // Remounts per state so each choice restarts its own countdown.
+        key={downloadIdx}
         report={report}
         mode={team ? 'team' : 'client'}
-        email={EMAIL_STATES[emailIdx].value}
+        pdf={DOWNLOAD_STATES[downloadIdx].value}
       />
     </div>
   );

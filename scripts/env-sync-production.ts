@@ -12,7 +12,7 @@
  *   --expect-org <id>         optional extra check against the linked orgId
  *   --only A,B                subset of the allowlist
  *   --approve-new A,B         approve previously proposed local names for creation only
- *   --allow-secret-rotation   needed (with --only) to touch REPORT_TOKEN_SECRET / CRON_SECRET
+ *   --allow-secret-rotation   needed (with --only) to touch REPORT_TOKEN_SECRET
  *   --offline                 dry run without calling the Vercel CLI
  *   --env-file <path>         source file (default .env; must be git-ignored)
  *

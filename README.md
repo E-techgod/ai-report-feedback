@@ -1,6 +1,6 @@
 # Quirón Shield Survey — MVP
 
-Standalone Next.js questionnaire: 20 yes/no questions, deterministic score, one finalized AI-assisted report shown on the web, downloadable as a server-rendered PDF and emailed automatically, plus an appointment-booking CTA. See `docs/report-email.md` for the architecture, configuration and migration plan.
+Standalone Next.js questionnaire: 20 yes/no questions, deterministic score, one finalized AI-assisted report shown on the web, downloadable as a server-rendered PDF for 5 minutes after submission, plus an appointment-booking CTA. Google Sheets is the only data store. See `docs/pdf-download.md` for the architecture.
 
 ## Setup
 
@@ -16,7 +16,7 @@ This ZIP is a standalone Next.js app. Do **not** copy its `package.json`, `tscon
 
 ## Google Sheets (POST /api/questionnaire)
 
-The UI submits to `POST /api/questionnaire`, which appends one row to the existing `Respuestas de formulario 1` tab using its current header names. Tracking fields now sit between email and the 20 questions, so answer columns are resolved by question headers. The app writes only its own tracking cells in newly linked rows; historical rows are not changed. Answers remain `Si`/`No` (the UI shows “Sí”). See [tracking and cutover](docs/tracking-and-cutover.md).
+The UI submits to `POST /api/questionnaire`, which appends one row to the existing `Respuestas de formulario 1` tab using its current header names. Tracking fields now sit between email and the 20 questions, so answer columns are resolved by question headers. The app writes only its own tracking cells in newly linked rows; historical rows are not changed. Answers remain `Si`/`No` (the UI shows “Sí”).
 
 1. Enable the **Google Sheets API** in the Cloud project that owns the service account.
 2. Share the spreadsheet with `GOOGLE_CLIENT_EMAIL` as **Editor**.
@@ -31,20 +31,17 @@ Duplicate protection (no schema change): the client keeps one submission id per 
 - The in-memory id/rate-limit guards are per server instance; the sheet check covers cross-instance duplicates.
 - `scripts/google-apps-script.gs` and `/api/submit` are the legacy webhook bridge and are no longer used by the UI.
 
-## Report, AI, PDF and email
+## Report, AI and PDF
 
-One **finalized report** is built on the server per submission, stored in Postgres, and used for the web page, the PDF and the email (details: `docs/report-email.md`).
+One **finalized report** is built on the server per submission and returned to the browser; it is used for the web page and the PDF and is **not stored** (details: `docs/pdf-download.md`).
 
 - **Rules engine (~65%)** — `src/lib/report.ts`: score, level (same labels as the Dashboard), the 6 areas, ranked top-3 priorities, findings, actions and the action plan. Deterministic and covered by tests.
-- **Fixed interface (~20%)** — headings, descriptions, CTA, disclaimer, all in `src/lib/report-content.ts`, the single source of every customer-visible string for the web view, PDF and email.
+- **Fixed interface (~20%)** — headings, descriptions, CTA, disclaimer, all in `src/lib/report-content.ts`, the single source of every customer-visible string for the web view and PDF.
 - **AI (≤15%)** — exactly 4 text slots written by the configured provider (`src/lib/narrative.ts`): an executive summary and a short context for each priority. `AI_PROVIDER` is `groq` (default, `GROQ_API_KEY`, `GROQ_MODEL`, default `openai/gpt-oss-20b`, strict `json_schema` output) or `anthropic` (explicit, tool schema). Output is re-validated with zod and retried once; a 429 waits for a short `Retry-After`. Per-slot word limits are derived so AI text stays ≤15% of the report's visible words (`src/lib/ai-share.ts`); if a provider still exceeds it, the report uses template text. The AI receives only computed results (no names, emails or raw answers) and never calculates, selects or reorders anything.
-- **AI failure** — if the provider is unconfigured, rate-limited, times out or returns invalid output, the report is finalized with template text, stored as `narrativeSource: "template"`, and the report itself says the AI was not used. It is never presented as AI-written.
-- **PDF** — rendered on the server (`@react-pdf/renderer`) from the stored report, not from the browser. "Descargar PDF" downloads it and the same file is attached to the email.
-- **Email** — sent by Resend right after the report is stored, to the address supplied in the questionnaire. Status shown to the user comes from the database ("Informe enviado" / "No se pudo enviar el correo"). Nothing is sent unless `REPORT_EMAIL_ENABLED=true`.
-- **Editing the design** — run `npm run dev` and open `/report-preview` (development only, 404 in production) to review the web view with sample data, in client or team mode, with each email status.
+- **AI failure** — if the provider is unconfigured, rate-limited, times out or returns invalid output, the report is finalized with template text, marked `narrativeSource: "template"`, and the report itself says the AI was not used. It is never presented as AI-written.
+- **PDF** — rendered on demand on the server (`@react-pdf/renderer`), never stored. After a successful submission the server issues a signed grant valid for **5 minutes** (repeatable downloads); after that the server refuses it and the page shows "Tu sesión de descarga ha expirado." There is no retrieval or regeneration afterwards.
+- **Editing the design** — run `npm run dev` and open `/report-preview` (development only, 404 in production) to review the web view with sample data, in client or team mode, including the download-window states.
 - **Editorial review needed** — the area/priority/context catalog in `src/lib/report.ts` (`THEMES`) reuses the prototype wording for three areas; the other three are drafts in the same tone.
-
-Setup: create a Neon database, set the variables in `.env.example`, then run `npm run db:migrate` once.
 
 ## Environment sync (local `.env` → Vercel Preview or Production)
 
@@ -58,7 +55,7 @@ npm run env:sync:preview -- --expect-project prj_xxx     # Preview only; type "s
 npm run env:sync:production -- --expect-project prj_xxx  # Production only; type "sync production"
 npm run env:sync:preview -- --dry-run                    # read-only Preview plan
 npm run env:sync:preview -- --approve-new NEW_SERVICE_TOKEN --expect-project prj_xxx
-npm run env:sync:production -- --only EMAIL_FROM,RESEND_API_KEY --expect-project prj_xxx
+npm run env:sync:production -- --only GOOGLE_SHEET_ID --expect-project prj_xxx
 ```
 
 Run `env:check` first: it prints the resolved `projectId` / `orgId` (from `.vercel/repo.json` in Vercel CLI 66.2.0, or `.vercel/project.json` in older links), names, and `create`, `update`, `skip`, or `blocked` for each target. `update` means an existing target-only record would be overwritten; the CLI does not reveal its value, so the check cannot tell whether the value already matches `.env`. The check never writes and exits 1 whenever an apply would be refused. An apply **requires** `--expect-project <that projectId>` (and optionally `--expect-org`) and an interactive confirmation.
@@ -67,12 +64,10 @@ Other options: `--offline` (dry run without calling the CLI) and `--env-file <pa
 
 ### What it does
 
-- **Default allowlist:** `GOOGLE_SHEET_ID`, `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `APP_URL`, `NEXT_PUBLIC_BOOKING_URL` (list in `scripts/lib/env-sync.ts`). Missing or empty local values are skipped, never written as blanks. `AI_PROVIDER`, `GROQ_API_KEY` and `GROQ_MODEL` are deliberately not in the default list: they show up as `propose` and need `--approve-new` (see below), so a routine sync cannot change which provider production uses.
+- **Default allowlist:** `GOOGLE_SHEET_ID`, `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `NEXT_PUBLIC_BOOKING_URL` (list in `scripts/lib/env-sync.ts`). Missing or empty local values are skipped, never written as blanks. `AI_PROVIDER`, `GROQ_API_KEY` and `GROQ_MODEL` are deliberately not in the default list: they show up as `propose` and need `--approve-new` (see below), so a routine sync cannot change which provider production uses.
 - **New entries:** nonempty names in `.env` are shown as `propose` when absent from every Vercel environment. For Preview, a name with one Production-only record is shown as `propose-preview`. A normal sync leaves proposals untouched. To approve creation, run `npm run env:sync:preview -- --approve-new NAME[,NAME...] --expect-project <id>` and type `sync preview`. This focused run creates only the approved Preview entries, without `--force`; if a Preview value already exists or the scope becomes ambiguous, the whole run is refused. It can create approved Production-only names even while another name remains shared and blocked. `--only` and `--approve-new` cannot be combined. Add new application variables to `.env.example` without values or credentials.
-- **Opt-in secrets:** `REPORT_TOKEN_SECRET` and `CRON_SECRET` are **not** part of a default run. They need `--only <name> --allow-secret-rotation`, print a warning, and require `rotate preview secrets` or `rotate production secrets` for the selected target.
-  - Replacing `REPORT_TOKEN_SECRET` invalidates every previously issued report link and download.
-  - `CRON_SECRET` has no separate cron-side setting: Vercel sends the project's `CRON_SECRET` as the `Authorization: Bearer` header of cron requests (`vercel.json` only holds the path and schedule), and `/api/cron/retry-emails` rejects any other bearer. A new value takes effect with the next deployment.
-- **Never synced, on purpose:** `REPORT_EMAIL_ENABLED` and `REPORT_EMAIL_ALLOWLIST` (delivery controls managed in the Vercel dashboard), `DATABASE_URL*` (owned by the Neon integration), and the legacy `GOOGLE_SHEETS_WEBHOOK_*`. These and runtime names such as `VERCEL_*`, `NOW_*`, and `NODE_ENV` are not proposed as new variables. Asking for a protected name with `--only` or `--approve-new` is an error.
+- **Opt-in secret:** `REPORT_TOKEN_SECRET` is **not** part of a default run. It needs `--only REPORT_TOKEN_SECRET --allow-secret-rotation`, prints a warning, and requires `rotate preview secrets` or `rotate production secrets` for the selected target. Replacing it invalidates every PDF download window that is still open (5 minutes at most).
+- **Never synced, on purpose:** the retired Neon / Resend / cron variables (`DATABASE_URL*`, `RESEND_*`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `APP_URL`, `CRON_SECRET`, `REPORT_EMAIL_ENABLED`, `REPORT_EMAIL_ALLOWLIST`) and the legacy `GOOGLE_SHEETS_WEBHOOK_*`. A stale local value is never pushed or proposed, and the tool never deletes anything: remove the obsolete variables from Vercel yourself when you are ready. Runtime names such as `VERCEL_*`, `NOW_*`, and `NODE_ENV` are not proposed as new variables either. Asking for a protected name with `--only` or `--approve-new` is an error.
 - **Create or update, failing closed:** the tool lists the project's variables (`vercel env ls --format json`; malformed or unexpected output is an error) and reads the project's **custom environments** (`vercel api /v9/projects/<projectId>/custom-environments`). It then writes a variable only in two cases:
   - **create** — the variable is absent from the listing, or a Preview entry is absent while exactly one Production-only record exists. Run as `vercel env add NAME --environment <target> --project <projectId> --type <secret|config> --yes` with **no `--force`**, so a same-target value cannot be overwritten. The value goes over stdin. New variables default to Secret; `NEXT_PUBLIC_*` names use Config because they are exposed to the browser.
   - **update** — exactly one record for the selected target only, no branch scope, and **the project has no custom environments**. Run with `--environment <target> --project <projectId> --force --yes`, the only place `--force` is used. The script requires its own typed confirmation before this call.
@@ -110,7 +105,6 @@ Set `NEXT_PUBLIC_BOOKING_URL` to the real, published Google Appointment Schedule
 
 - Must validate privacy/consent language and suitability of questions before a public blast.
 - No scoring adjustments for nonapplicable questions. All twenty must be answered. Confirm this business rule before launch.
-- Questionnaire responses live only in the header-mapped Google Sheet. Finalized reports and email status live in Postgres. Reports and PDFs are retrievable only with the per-report access token issued to the submitting browser; there are no public links.
-- Rate limiting / CAPTCHA, spam monitoring, credential rotation, retention policies, authorized staff access, and legal review are needed before a high-volume campaign.
+- Questionnaire responses live only in the header-mapped Google Sheet. Reports and PDFs are not stored anywhere: the browser holds the report in memory and the PDF is rendered only for a request carrying a valid, unexpired, report-specific grant; there are no public links.
+- Rate limiting / CAPTCHA (the database-backed limits were removed with Neon: use the Vercel Firewall rule in `docs/pdf-download.md`), spam monitoring, credential rotation, retention policies, authorized staff access, and legal review are needed before a high-volume campaign.
 - Ensure Vercel plan permits commercial usage. Secrets must never be in `NEXT_PUBLIC_` vars or committed.
-- Do not enable `REPORT_EMAIL_ENABLED` until the migration in `docs/report-email.md` is approved and a real test submission has been verified end to end.
