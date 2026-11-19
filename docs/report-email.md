@@ -29,6 +29,13 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 - `src/lib/pipeline.ts` – create report, send email (atomic claim), recovery sweep.
 - `src/lib/email.ts` – Resend client, branded HTML, webhook signature check.
 - `src/lib/pdf/ReportPdf.tsx` – server-side PDF (`@react-pdf/renderer`).
+  **Serverless packaging:** pdfkit loads its built-in fonts (Helvetica, Helvetica-Bold) with
+  `createRequire('#standard-fonts/*')`, which Next's file tracer cannot see. `next.config.ts` lists
+  `pdfkit/js/standard-fonts/**` (and the logo) in `outputFileTracingIncludes` for every route that
+  renders the PDF (download, submit, retry cron). Without it Vercel returns an empty HTTP 500 while
+  everything works locally. `tests/pdf-bundle.test.mjs` guards it; a render failure now logs
+  `[pdf] report <id>: render-failed: <reason>`. A new route that renders the PDF must be added to
+  that list.
 
 ## Guarantees and how they are enforced
 
