@@ -21,6 +21,8 @@
  *    exist, no existing variable is overwritten;
  *  - the existing-variable state is read again after the operator confirms and before the first
  *    write; if it differs from the plan that was shown, nothing is written;
+ *  - each create is followed by a fresh listing; no `ok` is logged until one independent target
+ *    record appears and the pre-existing records for that name retain their metadata;
  *  - the Vercel project is identified (projectId/orgId) before any write, pinned for the child
  *    process, and an apply must name the expected projectId;
  *  - the local env file must be git-ignored and untracked, or the run aborts;
@@ -244,7 +246,14 @@ export function classifyVariable(
   if (!Number.isInteger(customEnvironments) || customEnvironments < 0)
     return { kind: 'blocked', reason: 'custom environments could not be verified' };
   const mine = records.filter((record) => record.key === name);
-  if (mine.length === 0) return { kind: 'create' };
+  if (mine.length === 0) {
+    if (target === 'preview' && customEnvironments > 0)
+      return {
+        kind: 'blocked',
+        reason: 'custom environments exist; an independent Preview-only record cannot be verified',
+      };
+    return { kind: 'create' };
+  }
   if (mine.length > 1)
     return {
       kind: 'blocked',
@@ -500,6 +509,47 @@ export async function readProjectState(runner: VercelRunner): Promise<ProjectSta
   return { ok: true, records: list.records, customEnvironments: custom.count };
 }
 
+/** Metadata-only proof that a create added one independent target record and left old scopes intact. */
+export function verifyCreatedVariable(
+  name: string,
+  target: SyncTarget,
+  before: ProjectState,
+  after: ProjectState,
+): string | null {
+  if (!before.ok || !after.ok) return 'the fresh Vercel listing could not be verified';
+  if (before.customEnvironments !== after.customEnvironments)
+    return 'custom environments changed during the write';
+  const oldRecords = before.records.filter((record) => record.key === name);
+  const newRecords = after.records.filter((record) => record.key === name);
+  const independent = newRecords.filter(
+    (record) =>
+      record.targets.length === 1 &&
+      record.targets[0] === target &&
+      !record.gitBranch &&
+      record.customEnvironmentIds.length === 0,
+  );
+  if (independent.length !== 1 || newRecords.length !== oldRecords.length + 1)
+    return `no new independent ${target}-only record was found`;
+  const metadata = (records: EnvRecord[]) =>
+    JSON.stringify(
+      records
+        .map((record) => [
+          record.key,
+          [...record.targets].sort(),
+          record.gitBranch,
+          [...record.customEnvironmentIds].sort(),
+          record.createdAt,
+          record.updatedAt,
+        ])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    );
+  if (metadata(newRecords.filter((record) => record !== independent[0])) !== metadata(oldRecords))
+    return 'an existing record changed during the create';
+  return null;
+}
+
+class UnverifiedCreateError extends Error {}
+
 function run(
   bin: string,
   args: string[],
@@ -582,11 +632,18 @@ export function createVercelRunner(options: {
   const write = async (value: string, args: string[]) => {
     const result = await run(bin, args, value, { cwd, env, secrets: secrets() });
     if (result.code !== 0) throw new Error(reasonLine(result));
+    const response = extractJson(`${result.stdout}\n${result.stderr}`) as
+      | { status?: unknown; reason?: unknown }
+      | undefined;
+    if (response?.status === 'action_required')
+      throw new Error(
+        `Vercel CLI requested further action (${typeof response.reason === 'string' ? response.reason : 'unspecified'})`,
+      );
   };
+  const projectId = env.VERCEL_PROJECT_ID;
   return {
     listRecords: () => read(['env', 'ls', '--format', 'json'], 'vercel env ls', parseEnvList),
     listCustomEnvironments() {
-      const projectId = env.VERCEL_PROJECT_ID;
       if (!projectId) return Promise.resolve({ ok: false, reason: 'project identity not pinned' });
       return read(
         customEnvironmentsArgs(projectId),
@@ -595,11 +652,18 @@ export function createVercelRunner(options: {
       );
     },
     // No `--force`: a same-target value cannot be overwritten.
-    createVariable: (name, value) => write(value, ['env', 'add', name, target]),
+    createVariable: (name, value) => {
+      if (!projectId) throw new Error('project identity not pinned');
+      return write(value, ['env', 'add', name, '--environment', target, '--project', projectId]);
+    },
     // `--force` overwrites the target record; the caller has proven it is a lone target-only
     // record in a project without custom environments. Nothing else is touched. Never `env rm`.
-    updateVariable: (name, value) =>
-      write(value, ['env', 'add', name, target, '--force']),
+    updateVariable: (name, value) => {
+      if (!projectId) throw new Error('project identity not pinned');
+      return write(value, [
+        'env', 'add', name, '--environment', target, '--project', projectId, '--force',
+      ]);
+    },
   };
 }
 
@@ -903,18 +967,33 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     );
 
   const applied: string[] = [];
+  let verifiedState: ProjectState = fresh;
   for (const item of todo) {
     try {
       // `create` never overwrites (no --force); only a confirmed target-only `update` does.
-      if (item.operation === 'create') await runner.createVariable(item.name, local[item.name]);
+      if (item.operation === 'create') {
+        await runner.createVariable(item.name, local[item.name]);
+        const after = await readProjectState(runner);
+        const failure = verifyCreatedVariable(item.name, target, verifiedState, after);
+        if (failure)
+          throw new UnverifiedCreateError(
+            `CLI exited successfully, but ${failure}. This create may have taken effect.`,
+          );
+        verifiedState = after;
+      }
       else if (item.operation === 'update')
         await runner.updateVariable(item.name, local[item.name]);
       else throw new Error(`refusing to write a variable planned as "${item.operation}"`);
       applied.push(item.name);
       log(`  ok     ${item.name}`);
     } catch (error) {
-      log(`  FAILED ${item.name}: ${error instanceof Error ? error.message : 'error'}`);
-      log(`\nStopped after a failure. Already written: ${applied.join(', ') || 'none'}.`);
+      if (error instanceof UnverifiedCreateError) {
+        log(`  UNVERIFIED ${item.name}: ${error.message}`);
+        log(`\nStopped immediately. Check Vercel before retrying. Earlier verified writes: ${applied.join(', ') || 'none'}.`);
+      } else {
+        log(`  FAILED ${item.name}: ${error instanceof Error ? error.message : 'error'}`);
+        log(`\nStopped after a failure. Already written: ${applied.join(', ') || 'none'}.`);
+      }
       throw new Error('Synchronization failed');
     }
   }

@@ -42,6 +42,7 @@ const {
   redact,
   resolveProjectIdentity,
   runSync,
+  verifyCreatedVariable,
   isNewVariableCandidate,
   secretForms,
   selectNames,
@@ -156,6 +157,36 @@ test('Preview plan proposes a separate entry for an allowlisted Production-only 
       'preview',
     )[0].operation,
     'create',
+  );
+});
+
+test('post-write proof requires an independent Preview record and unchanged Production metadata', () => {
+  const before = stateOf([{ key: 'X', target: ['production'], updatedAt: 10 }]);
+  const good = stateOf([
+    { key: 'X', target: ['production'], updatedAt: 10 },
+    { key: 'X', target: ['preview'], updatedAt: 11 },
+  ]);
+  assert.equal(verifyCreatedVariable('X', 'preview', before, good), null);
+  assert.match(
+    verifyCreatedVariable(
+      'X',
+      'preview',
+      before,
+      stateOf([
+        { key: 'X', target: ['production'], updatedAt: 12 },
+        { key: 'X', target: ['preview'], updatedAt: 11 },
+      ]),
+    ),
+    /existing record changed/,
+  );
+  assert.match(
+    verifyCreatedVariable(
+      'X',
+      'preview',
+      before,
+      stateOf([{ key: 'X', target: ['production', 'preview'] }]),
+    ),
+    /no new independent preview-only record/,
   );
 });
 
@@ -434,7 +465,17 @@ test('explicit approval creates only the new name, without force or default upda
   await runSync(h.options);
   assert.deepEqual(
     addCalls(ws).map((call) => call.argv),
-    [['env', 'add', 'NEW_SERVICE_TOKEN', 'production']],
+    [
+      [
+        'env',
+        'add',
+        'NEW_SERVICE_TOKEN',
+        '--environment',
+        'production',
+        '--project',
+        IDS.projectId,
+      ],
+    ],
   );
   assert.equal(addCalls(ws)[0].stdin, 'new-service-secret-value');
   assert.equal(h.asked.length, 1);
@@ -579,7 +620,15 @@ test('apply sends values on stdin only, pins the project, and touches nothing el
   );
   for (const call of adds) {
     // only the pre-existing, proven Production-only variable is overwritten with --force
-    const expected = ['env', 'add', call.argv[2], 'production'];
+    const expected = [
+      'env',
+      'add',
+      call.argv[2],
+      '--environment',
+      'production',
+      '--project',
+      IDS.projectId,
+    ];
     if (call.argv[2] === 'ANTHROPIC_API_KEY') expected.push('--force');
     assert.deepEqual(call.argv, expected);
     for (const secret of SECRETS)
@@ -954,7 +1003,21 @@ test('TOCTOU: the state is read again after the confirmation and before the firs
   assert.deepEqual(seen, [2]); // one listing + one custom-environment read before the prompt
   assert.deepEqual(
     verbs(ws).map((v) => v.split(' ')[0] + ' ' + v.split(' ')[1].slice(0, 3)),
-    ['env ls', 'api /v9', 'env ls', 'api /v9', 'env add', 'env add', 'env add'],
+    [
+      'env ls',
+      'api /v9',
+      'env ls',
+      'api /v9',
+      'env add',
+      'env ls',
+      'api /v9',
+      'env add',
+      'env ls',
+      'api /v9',
+      'env add',
+      'env ls',
+      'api /v9',
+    ],
   );
 });
 
