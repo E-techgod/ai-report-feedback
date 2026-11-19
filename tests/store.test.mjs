@@ -44,6 +44,105 @@ test('a stored report that was tampered with fails its integrity check', async (
   await assert.rejects(() => store.getById(record.id), /integrity/);
 });
 
+test('sheet row linkage and tracking versions are idempotent and guarded', async () => {
+  const store = await freshStore();
+  const original = await seed(store, 'disabled');
+  assert.equal(original.sheetRowNumber, null);
+  const linked = await store.linkSheetRow(original.id, 17);
+  assert.equal(linked.sheetRowNumber, 17);
+  assert.equal((await store.linkSheetRow(original.id, 17)).trackingVersion, linked.trackingVersion);
+  assert.equal((await store.linkSheetRow(original.id, 18)).sheetRowNumber, 17);
+  assert.deepEqual(await store.listUnsynced(10), [original.id]);
+  await store.markPdfDownloaded(original.id, plus(1000));
+  const downloaded = await store.getById(original.id);
+  assert.equal(downloaded.pdfDownloadedAt.toISOString(), plus(1000).toISOString());
+  await store.markPdfDownloaded(original.id, plus(2000));
+  assert.equal((await store.getById(original.id)).trackingVersion, downloaded.trackingVersion);
+  assert.equal(await store.markSheetSynced(original.id, linked.trackingVersion), false);
+  assert.equal(await store.markSheetSynced(original.id, downloaded.trackingVersion), true);
+  assert.deepEqual(await store.listUnsynced(10), []);
+});
+
+test('row numbers are nonunique hints and failed sync backs off without starving another report', async () => {
+  const store = await freshStore();
+  const stale = await seed(store, 'disabled');
+  const valid = await seed(store, 'disabled');
+  await store.linkSheetRow(stale.id, 17);
+  await store.linkSheetRow(valid.id, 17);
+  const now = new Date();
+  const claimed = await store.claimSheetSync(stale.id, now);
+  assert.ok(claimed);
+  await store.deferSheetSync(stale.id, claimed.sheetSyncLeaseUntil, now);
+  await store.releaseSheetSync(stale.id, claimed.sheetSyncLeaseUntil);
+  assert.deepEqual(await store.listUnsynced(1), [valid.id]);
+  assert.equal((await store.getById(stale.id)).sheetSyncFailures, 1);
+  assert.equal(await store.claimSheetSync(stale.id, now), null);
+  await store.raw('update reports set sheet_sync_next_attempt_at = $2 where id = $1', [
+    stale.id,
+    new Date(now.getTime() - 1000).toISOString(),
+  ]);
+  assert.deepEqual(await store.listUnsynced(1), [valid.id], 'fresh work goes first');
+  assert.ok(await store.claimSheetSync(stale.id, now));
+});
+
+test('cutover re-queue changes only reviewed disabled reports once', async () => {
+  const store = await freshStore();
+  const record = await seed(store, 'disabled');
+  await store.linkSheetRow(record.id, 27);
+  assert.equal(
+    await store.requeueDisabled(
+      record.id,
+      plus(-60_000),
+      plus(60_000),
+      plus(120_000),
+      47 * 3600_000,
+    ),
+    true,
+  );
+  assert.equal(
+    await store.requeueDisabled(
+      record.id,
+      plus(-60_000),
+      plus(60_000),
+      plus(120_000),
+      47 * 3600_000,
+    ),
+    false,
+  );
+  const queued = await store.getById(record.id);
+  assert.equal(queued.emailStatus, 'pending');
+  assert.equal(queued.emailAttempts, 0);
+  assert.equal(queued.emailAcceptedAt, null);
+  assert.deepEqual(
+    (
+      await store.raw('select event from report_email_events where report_id = $1', [record.id])
+    ).rows.map((r) => r.event),
+    ['requeued'],
+  );
+  const old = await seed(store, 'disabled');
+  assert.equal(
+    await store.requeueDisabled(old.id, plus(-60_000), plus(60_000), plus(120_000), 47 * 3600_000),
+    false,
+  );
+});
+
+test('a cross-instance Sheet append lease has one winner and can be safely released', async () => {
+  const store = await freshStore();
+  const a = crypto.randomUUID();
+  const b = crypto.randomUUID();
+  const results = await Promise.all([
+    store.acquireSheetAppend('fp', a, t0),
+    store.acquireSheetAppend('fp', b, t0),
+  ]);
+  assert.equal(results.filter(Boolean).length, 1);
+  const winner = results[0] ? a : b;
+  const loser = results[0] ? b : a;
+  await store.releaseSheetAppend('fp', loser);
+  assert.equal(await store.acquireSheetAppend('fp', loser, plus(1000)), false);
+  await store.releaseSheetAppend('fp', winner);
+  assert.equal(await store.acquireSheetAppend('fp', loser, plus(1000)), true);
+});
+
 test('claimEmail lets exactly one concurrent caller win', async () => {
   const store = await freshStore();
   const { id } = await seed(store);

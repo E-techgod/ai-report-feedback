@@ -5,14 +5,20 @@ import { mailerFromEnv } from './email';
 import { generateNarrative } from './narrative';
 import { DEFAULT_CONFIG, type PipelineDeps } from './pipeline';
 import { renderReportPdf } from './pdf/ReportPdf';
+import { createGoogleSheetsGateway } from './google-sheets-client';
+import { syncReportTracking } from './sheet-tracking';
 import type { ReportStore } from './store';
 
 /** Builds the production dependencies from environment variables. Null when no database. */
 export function getPipelineDeps(): PipelineDeps | null {
   const store = createReportStore();
   if (!store) return null;
+  const sheet = createGoogleSheetsGateway();
   return {
     store,
+    syncTracking: sheet
+      ? (id, budgetMs) => syncReportTracking(store, sheet, id, budgetMs)
+      : undefined,
     mailer: mailerFromEnv(),
     generateNarrative,
     renderPdf: renderReportPdf,

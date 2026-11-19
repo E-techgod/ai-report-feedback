@@ -8,7 +8,7 @@ single stored object, so they can never disagree.
 ```
 Browser ──POST /api/questionnaire──▶ validate (consent required) + IP rate limit
                                       │
-                                      ├─ 1. append row to Google Sheets A:X   (unchanged mapping)
+                                      ├─ 1. append header-mapped row to Google Sheets
                                       ├─ 2. createReport():  rules engine + Claude (tool-use, zod-validated,
                                       │      1 bounded retry) → FinalReport → frozen → stored in Postgres
                                       │      (AI failed? stored as narrativeSource="template" and labelled so)
@@ -79,10 +79,11 @@ anywhere inside that hour). The endpoint path and its `CRON_SECRET` bearer check
 - **Skipped or very late runs.** If a run is skipped, a report created just after the previous run is
   reached only by the run two days later (≈48 h), which is past the window. It is then finalized as
   failed and **not sent**. A run that is merely late (still inside 47 h) recovers it normally.
-- **Backlog.** A sweep first finalizes expired reports, then processes _everything_ that is due in
-  batches of 25 until its 45 s budget is spent (the function limit is 60 s). On Hobby that is an
-  estimated 25–30 emails per run (about 1.5–2 s each for the PDF render plus the provider call; not measured); a large outage backlog could outlast the
-  window. See "Architectural notes".
+- **Backlog.** The cron first finalizes expired reports, then processes due emails in batches of 25
+  for up to 25 s. A send already in flight can exceed that soft deadline (Resend's request timeout
+  alone is 20 s). Sheet projection has a separate 12 s window, capped by an absolute 52 s work
+  deadline in the 60 s route, leaving eight seconds for cleanup and response. Real PDF/Resend
+  throughput is unmeasured; a large outage backlog may outlast the 47 h retry window.
 
 ### What the customer sees
 
@@ -113,9 +114,10 @@ no schema change.
 
 ### Architectural notes
 
-- **No new services or migrations were introduced.** Everything uses the existing tables and cron.
+- **No new services were introduced.** PR #7 adds idempotent report/Sheet tracking columns and a
+  shared append lease in `db/schema.sql`; migrate the database before deploying that branch.
 - **Daily cadence is a ceiling on resilience.** With Hobby, a first-send failure costs up to a day, a
-  missed run can cost the email, and throughput is an estimated 25–30 emails per run. If volume or reliability
+  missed run can cost the email, and throughput depends on measured PDF and provider latency. If volume or reliability
   matters, the clean fixes are a plan that allows frequent crons (restore a short schedule; the logic
   already supports it) or an external scheduler calling the endpoint with the bearer secret.
 - **Why 47 h and not 48 h:** a retry window equal to the cron period would let the second sweep land
@@ -124,6 +126,10 @@ no schema change.
   recover stuck sends with the `CRON_SECRET` bearer.
 
 ## Email audit: which implementation produces which email
+
+The current Sheet headers, prepared guard, header-based answer reader, and read-only requeue checks
+are documented in [tracking-and-cutover.md](tracking-and-cutover.md). This section preserves PR #6's
+audit and email comparison. No production trigger or Script Property was changed by PR #7.
 
 |                       | Legacy Apps Script                                                                                                | Resend (this app)                                                                                                             |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -140,9 +146,10 @@ priority's `finding`, `title` and `action` (or the report's own "nothing to stre
 says anything about AI authorship (the PDF carries the "how this report was made" note, which already
 distinguishes AI-assisted from template reports).
 
-## Legacy Apps Script: documented, NOT touched
+## Legacy Apps Script: documented, not activated
 
-Nothing in this repo installs, edits or removes any trigger or any part of the legacy script.
+Nothing in this repo installs, edits or removes any production trigger or part of the installed
+legacy script. The prepared patches remain inert until manually applied after approval.
 
 What the supplied `enviarCorreosPendientes()` does:
 
@@ -200,8 +207,9 @@ timestamps; no names or emails were read).
    - Legacy: Dashboard A–G are open-ended `ARRAYFORMULA`s over the responses tab; H and I are literal values
      the script writes **by row position**. Nothing links a Dashboard row to anything else.
    - Resend: `reports.email_status` (9 states) plus the `report_email_events` audit table.
-   - App rows and Form rows are identical in A:X and the Sheet holds no report id; the only link is email plus
-     answers. A content-based guard is therefore impossible without writing to the Sheet.
+   - At the time of PR #6's audit, app rows and Form rows had no report ID marker. PR #7 prepares
+     `ID Reporte` tracking for new app rows, allowing a legacy exclusion after the installed script
+     is reviewed. Historical rows must not be linked by positional guesswork.
    - The app's levels match the Dashboard formula (100 Excelente, 80 Alto, 60 Medio, 40 Bajo, else Muy bajo).
 5. **What the Sheet shows.**
    - Historical pending: exactly **1** row (response row 3, 9/4/2026, column H empty).
@@ -213,8 +221,9 @@ timestamps; no names or emails were read).
 6. **PDF and email use the same persisted report.** `generateNarrative` is called only in `createReport()`
    (`pipeline.ts`). Sending, retrying and the cron read the stored report, and a test proves a failed send never
    regenerates it.
-   - **Gap:** a report created while email is disabled gets status `disabled`, and no code path re-queues it.
-     Anyone who submits through the web app while both systems are off gets no email at all.
+   - **Gap:** a report created while email is disabled gets status `disabled`. PR #7 prepares a
+     reviewed-ID, dry-run-first requeue tool for the cutover gap; it is not activated. Anyone who
+     submits through the web app while both systems are off gets no immediate email.
 
 ### Phase B: proposal
 
@@ -224,24 +233,29 @@ columns H/I and all triggers stay in place. A manual Run does nothing while the 
 1. **Prepare (no production change).** Verify the Resend domain (SPF and DKIM). Set `RESEND_API_KEY`,
    `EMAIL_FROM` and `RESEND_WEBHOOK_SECRET`, and the Vercel production variables, still with
    `REPORT_EMAIL_ENABLED=false`. Register the webhook.
-2. **Kill-switch patch (prepared in the repo, applied by hand).** Three lines at the top of
-   `enviarCorreosPendientes()`: if the Script Property `LEGACY_EMAIL_ENABLED` is not `"true"`, log and return.
-   Delivered as a paste-ready file for review. It is not applied by us.
+2. **Kill-switch patch (prepared in the repo, applied by hand).** Add
+   `scripts/legacy-email-kill-switch.gs` to the installed project and put
+   `if (!legacyEmailEnabled_()) return;` at the start of `enviarCorreosPendientes()`. It defaults
+   off. If legacy delivery must continue before cutover, set `LEGACY_EMAIL_ENABLED=true` before
+   installing the guard. Review the header-based answer patch at the same time. None is applied.
 3. **Remove the dangerous draft** `scripts/apps-script-safe-email-trigger.gs` from the repo, or label it clearly.
-4. **Cutover order: gap plus backfill, not overlap.** Overlap sends customers two emails (visible); a gap can be
-   repaired.
+4. **Cutover order: gap plus reviewed requeue, not overlap.** This global kill sequence is only
+   appropriate after Form-only delivery has a replacement or the Form is retired. If Forms stays
+   active, keep legacy mail for Form rows and first prove a tested exclusion for app rows.
    1. In a quiet hour, set `LEGACY_EMAIL_ENABLED` to off.
    2. Right away, set `REPORT_EMAIL_ENABLED=true` in production.
-   3. Run a small, idempotent re-queue script for `disabled` reports created since the cutover. The idempotency
-      key (`report-email/<id>`) still prevents double sends.
+   3. Dry-run `scripts/requeue-disabled-reports.ts` for explicitly reviewed, never-attempted IDs
+      inside the 47-hour window. It verifies the report marker and Dashboard B/H before an approved
+      apply. The idempotency key (`report-email/<id>`) protects later sends.
 5. **Historical records.** Leave row 3 alone (the kill switch stops it being sent). Leave rows 14–18 alone and
    keep the positional-fragility note. Old respondents cannot be back-sent: there are no Neon reports for them.
-6. **Dashboard.** No formula changes. New app rows show an empty column H. A Neon-sourced status column is a
-   separate, later task.
+6. **Dashboard.** No production formula changes. New app rows have report/email tracking columns
+   on the response tab; Dashboard H remains the legacy sent flag and is checked before requeue.
 7. **Test a real Resend email without touching production.**
    - Use a Neon branch (`neon checkout test --create`) and a Vercel preview.
-   - Use a **copy** of the Sheet (a copied spreadsheet does not copy triggers, so legacy cannot fire), or a seeded
-     `PRUEBA` report sent without the Sheet.
+   - Use an approved isolated Sheet dataset (or a seeded `PRUEBA` report without the Sheet).
+     Automatic approval review rejected copying the live response Sheet because it would replicate
+     respondent data. No copy was made. Verify `updatedCells` behavior against an authorized copy.
    - Send to an address you control. Check rendering in Gmail, Outlook and Apple Mail.
    - Check the attached PDF opens and matches the website download.
    - Check `accepted` → `delivered` through the webhook.

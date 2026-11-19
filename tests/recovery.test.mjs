@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MailError } from '../src/lib/email.ts';
+import { trackingAttemptBudget, trackingDeadline } from '../src/lib/cron-budget.ts';
 import {
   DEFAULT_CONFIG,
   createReport,
@@ -275,4 +276,51 @@ test('one sweep drains a backlog larger than a batch', async () => {
     failed: 0,
     skipped: 0,
   });
+});
+
+test('cron sees due reports beyond an entire skipped batch', async () => {
+  const ctx = await setup();
+  for (let n = 0; n < 30; n++) await submitAt(ctx, at(0, 10), n);
+  ctx.deps.mailer = null; // no claim is possible; each row remains due
+  ctx.h.clock.t = sweepAt(0);
+  const summary = await processDueEmails(ctx.deps);
+  assert.equal(summary.skipped, 30);
+  assert.equal(summary.due, 30);
+});
+
+test('cron email budget stops before another send and defers Sheet projection', async () => {
+  const ctx = await setup();
+  for (let n = 0; n < 3; n++) await submitAt(ctx, at(0, 10), n);
+  let elapsed = 0;
+  let sends = 0;
+  let sheetCalls = 0;
+  ctx.deps.mailer = {
+    async send() {
+      elapsed += 20;
+      sends += 1;
+      return { messageId: `em_budget_${sends}` };
+    },
+  };
+  ctx.deps.syncTracking = async () => {
+    sheetCalls += 1;
+    return true;
+  };
+  ctx.h.clock.t = sweepAt(0);
+  const summary = await processDueEmails(ctx.deps, { budgetMs: 25, wallNow: () => elapsed });
+  assert.equal(summary.accepted, 2);
+  assert.equal(sends, 2);
+  assert.equal(sheetCalls, 0, 'Sheet work belongs to the separate cron phase');
+  const remaining = await ctx.store.listDueForEmail(new Date(ctx.h.clock.t), 10, {
+    maxAttempts: ctx.deps.config.maxAttempts,
+    leaseMs: ctx.deps.config.leaseMs,
+    maxAgeMs: ctx.deps.config.maxAgeMs,
+  });
+  assert.equal(remaining.length, 1);
+});
+
+test('tracking deadline preserves cron cleanup reserve after slow email work', () => {
+  const deadline = trackingDeadline(0, 48_000);
+  assert.equal(deadline, 52_000);
+  assert.equal(trackingAttemptBudget(deadline, 48_000), 4_000);
+  assert.equal(trackingAttemptBudget(deadline, 53_000), 0);
 });
