@@ -278,9 +278,9 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       >
         <Page size="A4" style={styles.page}>
           <View style={styles.header} fixed>
-            {/* eslint-disable-next-line jsx-a11y/alt-text -- react-pdf Image is not a DOM img */}
             {logo ? (
               <View style={styles.logoBox}>
+                {/* eslint-disable-next-line jsx-a11y/alt-text -- react-pdf Image is not a DOM img */}
                 <Image style={styles.logo} src={{ data: logo, format: 'png' }} />
               </View>
             ) : (
