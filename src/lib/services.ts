@@ -7,6 +7,7 @@ import { DEFAULT_CONFIG, parseEmailAllowlist, type PipelineDeps } from './pipeli
 import { renderReportPdf } from './pdf/ReportPdf';
 import { createGoogleSheetsGateway } from './google-sheets-client';
 import { syncReportTracking } from './sheet-tracking';
+import { publicSiteUrl } from './site-url';
 import type { ReportStore } from './store';
 
 /** Builds the production dependencies from environment variables. Null when no database. */
@@ -30,7 +31,7 @@ export function getPipelineDeps(): PipelineDeps | null {
       emailEnabled: process.env.REPORT_EMAIL_ENABLED === 'true',
       // Optional test gate: when set, only these addresses are ever emailed.
       emailAllowlist: parseEmailAllowlist(process.env.REPORT_EMAIL_ALLOWLIST),
-      siteUrl: process.env.APP_URL || null,
+      siteUrl: publicSiteUrl(),
     },
   };
 }
