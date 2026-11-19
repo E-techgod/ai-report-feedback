@@ -80,6 +80,26 @@ test('default sync excludes the opt-in secrets; the allowlist never contains for
   assert.ok(!selectNames(undefined).includes('CRON_SECRET'));
 });
 
+test('Preview classification updates only a lone Preview record', () => {
+  const preview = [
+    {
+      key: 'X',
+      targets: ['preview'],
+      gitBranch: null,
+      customEnvironmentIds: [],
+      createdAt: null,
+      updatedAt: null,
+    },
+  ];
+  assert.deepEqual(classifyVariable('X', preview, 0, 'preview'), { kind: 'update' });
+  assert.equal(classifyVariable('X', preview, 0, 'production').kind, 'blocked');
+  assert.equal(
+    classifyVariable('X', [{ ...preview[0], targets: ['preview', 'production'] }], 0, 'preview')
+      .kind,
+    'blocked',
+  );
+});
+
 test('forbidden names are rejected even with the rotation flag', () => {
   for (const name of [
     'REPORT_EMAIL_ENABLED',
