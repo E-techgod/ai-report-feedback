@@ -126,6 +126,44 @@ test('pdf filename is ASCII-safe', () => {
   assert.equal(pdfFilename(''), 'Diagnostico-Patrimonial-Quiron.pdf');
 });
 
+test("a permanent provider error keeps Resend's error name; retryable ones and unsafe names stay bare", async () => {
+  const send = async (status, body) => {
+    const { mailer: m } = mailer(() => new Response(body, { status }));
+    return m.send(message).catch((e) => e);
+  };
+  const named = await send(
+    403,
+    JSON.stringify({
+      name: 'validation_error',
+      message: 'You can only send testing emails to your own email address (someone@example.com).',
+    }),
+  );
+  assert.equal(named.message, 'resend-http-403:validation_error');
+  assert.equal(named.retryable, false);
+  assert.doesNotMatch(named.message, /someone|example\.com|testing/);
+  assert.equal(
+    (await send(403, JSON.stringify({ name: 'invalid_api_key' }))).message,
+    'resend-http-403:invalid_api_key',
+  );
+  // retryable statuses are never decorated: 'resend-http-409' must stay an exact AMBIGUOUS_ERRORS match
+  for (const status of [409, 429, 500, 503])
+    assert.equal(
+      (await send(status, JSON.stringify({ name: 'concurrent_idempotent_requests' }))).message,
+      `resend-http-${status}`,
+    );
+  // anything that is not a short snake_case name is ignored
+  for (const body of [
+    'not json',
+    '{}',
+    '{"name":42}',
+    '{"name":"Has Spaces"}',
+    '{"name":"a@b.com"}',
+    `{"name":"${'x'.repeat(60)}"}`,
+    '',
+  ])
+    assert.equal((await send(403, body)).message, 'resend-http-403', body);
+});
+
 test('provider errors are classified as retryable or permanent', async () => {
   const outcomes = {
     429: true,
