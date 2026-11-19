@@ -8,10 +8,10 @@
  *  - values travel to the Vercel CLI through its stdin, never through argv, a shell, a log or a
  *    printed plan; all CLI output is redacted before it is shown;
  *  - nothing is deleted (no `env rm`) and no deployment is triggered;
- *  - FAIL CLOSED on ambiguity: a variable is only written when it either does not exist at all or
- *    exists as exactly one target-only record. A variable shared with another environment, split
- *    across records, branch-scoped or of unknown scope is never touched (we cannot prove that an
- *    upsert would leave the other environments alone);
+ *  - FAIL CLOSED on ambiguity: a variable is only written when absent from its target and safely
+ *    creatable, or when it exists as exactly one target-only record and an update is confirmed.
+ *    Preview creation beside one Production-only record needs --approve-new. Shared, split,
+ *    branch-scoped or unknown scopes are never changed;
  *  - a CREATE never uses `--force`, so the CLI/API refuses it if the variable exists after all (for
  *    example a Production record the listing did not show); `--force` is only used to overwrite a
  *    record that was proven to be a lone Production-only one;
@@ -21,6 +21,8 @@
  *    exist, no existing variable is overwritten;
  *  - the existing-variable state is read again after the operator confirms and before the first
  *    write; if it differs from the plan that was shown, nothing is written;
+ *  - each create is followed by a fresh listing; no `ok` is logged until one independent target
+ *    record appears and the pre-existing records for that name retain their metadata;
  *  - the Vercel project is identified (projectId/orgId) before any write, pinned for the child
  *    process, and an apply must name the expected projectId;
  *  - the local env file must be git-ignored and untracked, or the run aborts;
@@ -88,7 +90,14 @@ const PLAN_NOTES: Record<string, string> = {
   NEXT_PUBLIC_BOOKING_URL: 'inlined at build time: needs a rebuild, not only a restart',
 };
 
-export type Operation = 'create' | 'update' | 'upsert' | 'propose' | 'skip' | 'blocked';
+export type Operation =
+  | 'create'
+  | 'update'
+  | 'upsert'
+  | 'propose'
+  | 'propose-preview'
+  | 'skip'
+  | 'blocked';
 export type PlanItem = { name: string; operation: Operation; note?: string };
 
 export function readEnvFile(file: string): Record<string, string> {
@@ -220,12 +229,13 @@ export type ProjectState =
 export type Classification =
   | { kind: 'create' }
   | { kind: 'update' }
+  | { kind: 'propose-preview' }
   | { kind: 'blocked'; reason: string };
 
 /**
- * Fail closed. Safe to write only when the variable is absent everywhere (a create, which never
- * overwrites), or is exactly one target-only record without a branch AND the project has no
- * custom environments (the CLI listing cannot say whether such a record also belongs to one).
+ * Fail closed. A Preview entry may be created beside one Production-only record without --force.
+ * Updates require exactly one target-only record without a branch AND no custom environments
+ * (the CLI listing cannot say whether such a record also belongs to a custom environment).
  */
 export function classifyVariable(
   name: string,
@@ -236,7 +246,14 @@ export function classifyVariable(
   if (!Number.isInteger(customEnvironments) || customEnvironments < 0)
     return { kind: 'blocked', reason: 'custom environments could not be verified' };
   const mine = records.filter((record) => record.key === name);
-  if (mine.length === 0) return { kind: 'create' };
+  if (mine.length === 0) {
+    if (target === 'preview' && customEnvironments > 0)
+      return {
+        kind: 'blocked',
+        reason: 'custom environments exist; an independent Preview-only record cannot be verified',
+      };
+    return { kind: 'create' };
+  }
   if (mine.length > 1)
     return {
       kind: 'blocked',
@@ -250,6 +267,13 @@ export function classifyVariable(
       reason: `shared with ${record.customEnvironmentIds.length} custom environment(s); split it in the dashboard first`,
     };
   const targets = [...new Set(record.targets)];
+  if (
+    target === 'preview' &&
+    targets.length === 1 &&
+    targets[0] === 'production' &&
+    customEnvironments === 0
+  )
+    return { kind: 'propose-preview' };
   if (targets.length === 1 && targets[0] === target) {
     if (customEnvironments > 0)
       return {
@@ -307,11 +331,17 @@ export function buildPlan(
     if (!state || !state.ok) return { name, operation: 'upsert', note: note ?? 'unverified' };
     const verdict = classifyVariable(name, state.records, state.customEnvironments, target);
     if (verdict.kind === 'blocked') return { name, operation: 'blocked', note: verdict.reason };
+    if (verdict.kind === 'propose-preview')
+      return {
+        name,
+        operation: 'propose-preview',
+        note: 'Production-only exists; create a separate Preview-only entry with --approve-new',
+      };
     return { name, operation: verdict.kind, note };
   });
 }
 
-/** New local names are proposed only when absent from every Vercel environment. */
+/** Eligible local names outside the fixed allowlist can be proposed for create-only approval. */
 export function isNewVariableCandidate(name: string): boolean {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
   if ((SYNC_ALLOWLIST as readonly string[]).includes(name)) return false;
@@ -325,31 +355,35 @@ export function buildNewVariablePlan(
   local: Record<string, string>,
   state: ProjectState,
   approved: readonly string[] = [],
+  target: SyncTarget = 'production',
 ): PlanItem[] {
   const approvedSet = new Set(approved);
   return Object.keys(local)
-    .filter((name) => isNewVariableCandidate(name) && local[name].trim() !== '')
+    .filter(
+      (name) =>
+        (isNewVariableCandidate(name) ||
+          (approvedSet.has(name) && (SYNC_DEFAULT as readonly string[]).includes(name))) &&
+        local[name].trim() !== '',
+    )
     .sort()
     .flatMap((name): PlanItem[] => {
       if (!state.ok)
         return approvedSet.has(name)
           ? [{ name, operation: 'blocked', note: 'Vercel records could not be verified' }]
           : [];
-      if (state.records.some((record) => record.key === name))
+      const verdict = classifyVariable(name, state.records, state.customEnvironments, target);
+      if (verdict.kind === 'blocked' || verdict.kind === 'update')
         return approvedSet.has(name)
-          ? [
-              {
-                name,
-                operation: 'blocked',
-                note: 'already exists in Vercel; new-name approval cannot overwrite it',
-              },
-            ]
+          ? [{ name, operation: 'blocked', note: 'target already exists or scope is ambiguous' }]
           : [];
       return [
         {
           name,
-          operation: approvedSet.has(name) ? 'create' : 'propose',
-          note: 'new local name; create only, never overwrite',
+          operation: approvedSet.has(name) ? 'create' : verdict.kind === 'propose-preview' ? 'propose-preview' : 'propose',
+          note:
+            verdict.kind === 'propose-preview'
+              ? 'Production-only exists; create a separate Preview-only entry without overwriting it'
+              : 'new local name; create only, never overwrite',
         },
       ];
     });
@@ -385,10 +419,11 @@ export function selectNames(
 
 export function formatPlan(plan: readonly PlanItem[]): string {
   const width = Math.max(...plan.map((item) => item.name.length));
+  const operationWidth = Math.max(...plan.map((item) => item.operation.length));
   return plan
     .map(
       (item) =>
-        `  ${item.operation.padEnd(7)} ${item.name.padEnd(width)}  value: <hidden>` +
+        `  ${item.operation.padEnd(operationWidth)} ${item.name.padEnd(width)}  value: <hidden>` +
         (item.note ? `  (${item.note})` : ''),
     )
     .join('\n');
@@ -459,7 +494,7 @@ export interface VercelRunner {
   listRecords(): Promise<ListResult>;
   /** How many custom environments the project has, or why that could not be established. */
   listCustomEnvironments(): Promise<CustomEnvResult>;
-  /** Add a target variable that must not exist yet (no `--force`); value on stdin only. */
+  /** Add a target variable that must not exist in that target (no `--force`); value on stdin only. */
   createVariable(name: string, value: string): Promise<void>;
   /** Overwrite a proven target-only variable (`--force`); value on stdin only. */
   updateVariable(name: string, value: string): Promise<void>;
@@ -473,6 +508,47 @@ export async function readProjectState(runner: VercelRunner): Promise<ProjectSta
   if (!custom.ok) return { ok: false, reason: `custom environments: ${custom.reason}` };
   return { ok: true, records: list.records, customEnvironments: custom.count };
 }
+
+/** Metadata-only proof that a create added one independent target record and left old scopes intact. */
+export function verifyCreatedVariable(
+  name: string,
+  target: SyncTarget,
+  before: ProjectState,
+  after: ProjectState,
+): string | null {
+  if (!before.ok || !after.ok) return 'the fresh Vercel listing could not be verified';
+  if (before.customEnvironments !== after.customEnvironments)
+    return 'custom environments changed during the write';
+  const oldRecords = before.records.filter((record) => record.key === name);
+  const newRecords = after.records.filter((record) => record.key === name);
+  const independent = newRecords.filter(
+    (record) =>
+      record.targets.length === 1 &&
+      record.targets[0] === target &&
+      !record.gitBranch &&
+      record.customEnvironmentIds.length === 0,
+  );
+  if (independent.length !== 1 || newRecords.length !== oldRecords.length + 1)
+    return `no new independent ${target}-only record was found`;
+  const metadata = (records: EnvRecord[]) =>
+    JSON.stringify(
+      records
+        .map((record) => [
+          record.key,
+          [...record.targets].sort(),
+          record.gitBranch,
+          [...record.customEnvironmentIds].sort(),
+          record.createdAt,
+          record.updatedAt,
+        ])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    );
+  if (metadata(newRecords.filter((record) => record !== independent[0])) !== metadata(oldRecords))
+    return 'an existing record changed during the create';
+  return null;
+}
+
+class UnverifiedCreateError extends Error {}
 
 function run(
   bin: string,
@@ -556,11 +632,18 @@ export function createVercelRunner(options: {
   const write = async (value: string, args: string[]) => {
     const result = await run(bin, args, value, { cwd, env, secrets: secrets() });
     if (result.code !== 0) throw new Error(reasonLine(result));
+    const response = extractJson(`${result.stdout}\n${result.stderr}`) as
+      | { status?: unknown; reason?: unknown }
+      | undefined;
+    if (response?.status === 'action_required')
+      throw new Error(
+        `Vercel CLI requested further action (${typeof response.reason === 'string' ? response.reason : 'unspecified'})`,
+      );
   };
+  const projectId = env.VERCEL_PROJECT_ID;
   return {
     listRecords: () => read(['env', 'ls', '--format', 'json'], 'vercel env ls', parseEnvList),
     listCustomEnvironments() {
-      const projectId = env.VERCEL_PROJECT_ID;
       if (!projectId) return Promise.resolve({ ok: false, reason: 'project identity not pinned' });
       return read(
         customEnvironmentsArgs(projectId),
@@ -568,12 +651,19 @@ export function createVercelRunner(options: {
         parseCustomEnvironments,
       );
     },
-    // No `--force`: if the variable exists after all, the CLI/API refuses instead of overwriting.
-    createVariable: (name, value) => write(value, ['env', 'add', name, target]),
+    // No `--force`: a same-target value cannot be overwritten.
+    createVariable: (name, value) => {
+      if (!projectId) throw new Error('project identity not pinned');
+      return write(value, ['env', 'add', name, '--environment', target, '--project', projectId]);
+    },
     // `--force` overwrites the target record; the caller has proven it is a lone target-only
     // record in a project without custom environments. Nothing else is touched. Never `env rm`.
-    updateVariable: (name, value) =>
-      write(value, ['env', 'add', name, target, '--force']),
+    updateVariable: (name, value) => {
+      if (!projectId) throw new Error('project identity not pinned');
+      return write(value, [
+        'env', 'add', name, '--environment', target, '--project', projectId, '--force',
+      ]);
+    },
   };
 }
 
@@ -737,7 +827,10 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   if (options.only && approvedNew.length)
     throw new Error('--only cannot be combined with --approve-new; run separate focused commands');
   for (const name of approvedNew) {
-    if (!isNewVariableCandidate(name) || !local[name]?.trim())
+    if (
+      !(isNewVariableCandidate(name) || (SYNC_DEFAULT as readonly string[]).includes(name)) ||
+      !local[name]?.trim()
+    )
       throw new Error(`--approve-new ${name} is not an eligible nonempty local variable`);
   }
   // A new-name approval is a focused create run; it cannot update default allowlisted variables.
@@ -797,13 +890,15 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
   const plan = [
     ...buildPlan(local, list, names, target),
-    ...(options.only ? [] : buildNewVariablePlan(local, list, approvedNew)),
+    ...(options.only ? [] : buildNewVariablePlan(local, list, approvedNew, target)),
   ];
   log(formatPlan(plan));
   const todo = plan.filter((item) => ['create', 'update', 'upsert'].includes(item.operation));
   const skipped = plan.filter((item) => item.operation === 'skip').map((item) => item.name);
   const blocked = plan.filter((item) => item.operation === 'blocked').map((item) => item.name);
-  const proposed = plan.filter((item) => item.operation === 'propose').map((item) => item.name);
+  const proposed = plan
+    .filter((item) => item.operation === 'propose' || item.operation === 'propose-preview')
+    .map((item) => item.name);
   if (proposed.length)
     log(
       `  PROPOSED (not applied): ${proposed.join(', ')}. ` +
@@ -858,7 +953,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     throw new Error(`Cannot re-verify existing variables (${fresh.reason}); nothing was written`);
   const freshPlan = [
     ...buildPlan(local, fresh, names, target),
-    ...(options.only ? [] : buildNewVariablePlan(local, fresh, approvedNew)),
+    ...(options.only ? [] : buildNewVariablePlan(local, fresh, approvedNew, target)),
   ];
   const signature = (items: readonly PlanItem[]) =>
     JSON.stringify(items.map((item) => [item.name, item.operation]));
@@ -872,18 +967,33 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     );
 
   const applied: string[] = [];
+  let verifiedState: ProjectState = fresh;
   for (const item of todo) {
     try {
       // `create` never overwrites (no --force); only a confirmed target-only `update` does.
-      if (item.operation === 'create') await runner.createVariable(item.name, local[item.name]);
+      if (item.operation === 'create') {
+        await runner.createVariable(item.name, local[item.name]);
+        const after = await readProjectState(runner);
+        const failure = verifyCreatedVariable(item.name, target, verifiedState, after);
+        if (failure)
+          throw new UnverifiedCreateError(
+            `CLI exited successfully, but ${failure}. This create may have taken effect.`,
+          );
+        verifiedState = after;
+      }
       else if (item.operation === 'update')
         await runner.updateVariable(item.name, local[item.name]);
       else throw new Error(`refusing to write a variable planned as "${item.operation}"`);
       applied.push(item.name);
       log(`  ok     ${item.name}`);
     } catch (error) {
-      log(`  FAILED ${item.name}: ${error instanceof Error ? error.message : 'error'}`);
-      log(`\nStopped after a failure. Already written: ${applied.join(', ') || 'none'}.`);
+      if (error instanceof UnverifiedCreateError) {
+        log(`  UNVERIFIED ${item.name}: ${error.message}`);
+        log(`\nStopped immediately. Check Vercel before retrying. Earlier verified writes: ${applied.join(', ') || 'none'}.`);
+      } else {
+        log(`  FAILED ${item.name}: ${error instanceof Error ? error.message : 'error'}`);
+        log(`\nStopped after a failure. Already written: ${applied.join(', ') || 'none'}.`);
+      }
       throw new Error('Synchronization failed');
     }
   }

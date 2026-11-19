@@ -30,14 +30,16 @@ export const IDS = { projectId: 'prj_test123', orgId: 'team_test456' };
  *   FAKE_LS_EXTRA    JSON object merged into the `env ls` document (hiddenProductionEnvCount, pagination)
  *   FAKE_CUSTOM_ENVS JSON array returned as `environments` by the custom-environments API call
  *   FAKE_API_FAIL / FAKE_API_RAW   make the custom-environments call fail / print raw text
- * `env add` without --force refuses an existing variable (listed or hidden), like the real CLI/API.
+ * `env add` without --force refuses an existing variable in the same target (or a hidden record).
+ * Successful adds persist fake records unless FAKE_NO_PERSIST is set; that models a CLI exit 0
+ * without a Vercel write. The fake requires the CLI 66.2.0 --environment/--project flags.
  */
 function fakeVercel(dir) {
   const bin = path.join(dir, 'fake-vercel.mjs');
   writeFileSync(
     bin,
     `#!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 // Knobs a test can change while a run is in progress (e.g. between the plan and the apply).
 if (existsSync(process.env.FAKE_LOG + '.control'))
   Object.assign(process.env, JSON.parse(readFileSync(process.env.FAKE_LOG + '.control', 'utf8')));
@@ -49,7 +51,7 @@ appendFileSync(
   JSON.stringify({ argv, stdin, project: process.env.VERCEL_PROJECT_ID, org: process.env.VERCEL_ORG_ID }) + '\\n',
 );
 if (argv[0] === 'env' && argv[1] === 'ls') {
-  if (process.env.FAKE_LS_FAIL) {
+  if (process.env.FAKE_LS_FAIL || (process.env.FAKE_LS_FAIL_AFTER_ADD && existsSync(process.env.FAKE_LOG + '.records'))) {
     console.error('Vercel CLI 50.0.0');
     console.error('Error: not logged in');
     process.exit(1);
@@ -83,21 +85,50 @@ if (argv[0] === 'api') {
   process.exit(0);
 }
 if (argv[0] === 'env' && argv[1] === 'add') {
+  if (process.env.FAKE_ACTION_REQUIRED) {
+    console.log(JSON.stringify({ status: 'action_required', reason: 'git_branch_required' }));
+    process.exit(0);
+  }
+  const targetFlag = argv.indexOf('--environment');
+  const projectFlag = argv.indexOf('--project');
+  if (targetFlag < 0 || projectFlag < 0) {
+    console.log(JSON.stringify({ status: 'action_required', reason: 'environment_required' }));
+    process.exit(0);
+  }
+  if (argv[projectFlag + 1] !== process.env.VERCEL_PROJECT_ID) {
+    console.error('Error: wrong project');
+    process.exit(1);
+  }
   if (process.env.FAKE_FAIL_ON === argv[2]) {
     console.error('Vercel CLI 50.0.0');
     console.error('Error: rejected ' + (process.env.FAKE_LEAK ? stdin : ''));
     process.exit(1);
   }
   const hidden = (process.env.FAKE_HIDDEN ?? '').split(',').filter(Boolean);
-  const exists = hidden.includes(argv[2]) || currentRecords().some((r) => r.key === argv[2]);
+  const target = argv[targetFlag + 1];
+  const exists = hidden.includes(argv[2]) || currentRecords().some((r) =>
+    r.key === argv[2] && (Array.isArray(r.target) ? r.target : [r.target]).includes(target)
+  );
   if (exists && !argv.includes('--force')) {
     console.error('Error: A variable with the name ' + argv[2] + ' already exists');
     process.exit(1);
+  }
+  if (!process.env.FAKE_NO_PERSIST) {
+    const records = currentRecords();
+    if (argv.includes('--force')) {
+      const existing = records.find((r) =>
+        r.key === argv[2] && (Array.isArray(r.target) ? r.target : [r.target]).includes(target)
+      );
+      if (existing) existing.updatedAt = Date.now();
+    } else records.push({ key: argv[2], target: [process.env.FAKE_WRONG_TARGET ?? target] });
+    writeFileSync(process.env.FAKE_LOG + '.records', JSON.stringify(records));
   }
 }
 process.exit(0);
 
 function currentRecords() {
+  if (existsSync(process.env.FAKE_LOG + '.records'))
+    return JSON.parse(readFileSync(process.env.FAKE_LOG + '.records', 'utf8'));
   if (process.env.FAKE_LS_SEQ) {
     const seq = JSON.parse(process.env.FAKE_LS_SEQ);
     const calls = readFileSync(process.env.FAKE_LOG, 'utf8')
