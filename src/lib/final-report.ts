@@ -61,7 +61,7 @@ export const finalReportSchema = z.object({
     executiveSummary: z.string(),
     priorityContexts: z.array(z.string()),
   }),
-  /** 'ai' only when Claude's output passed the schema; otherwise 'template' (stated in the report). */
+  /** 'ai' only when the AI output passed the schema; otherwise 'template' (stated in the report). */
   narrativeSource: z.enum(['ai', 'template']),
   aiFailureReason: z.string().nullable(),
   /** Frozen at generation so web, PDF and email always point to the same booking page. */

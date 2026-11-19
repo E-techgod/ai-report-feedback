@@ -22,7 +22,7 @@ const json = (body: unknown, status = 200) =>
 
 /**
  * 1) validates the submission (consent is mandatory), 2) appends a header-mapped Sheet row,
- * 3) creates the ONE finalized report (Claude + rules) and persists it, 4) schedules the email.
+ * 3) creates the ONE finalized report (AI narrative + rules) and persists it, 4) schedules the email.
  * The response carries the finalized report; the browser never builds its own narrative.
  */
 export async function handleQuestionnaire(

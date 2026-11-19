@@ -37,7 +37,7 @@ test('success: one report, one email to the stored address with the PDF attached
   assert.equal(h.sent[0].attachments[0].content.toString(), '%PDF-fake');
   assert.match(h.sent[0].attachments[0].filename, /^Diagnostico-Patrimonial-Quiron-Ana\.pdf$/);
   // The email is a concise summary: the long AI-written text lives in the attached PDF only.
-  assert.ok(!h.sent[0].html.includes('Texto redactado por Claude.'));
+  assert.ok(!h.sent[0].html.includes('Texto redactado por IA.'));
   const after = await store.getById(record.id);
   assert.equal(after.emailStatus, 'accepted');
   assert.equal(after.emailProviderMessageId, 'em_1');
@@ -46,7 +46,7 @@ test('success: one report, one email to the stored address with the PDF attached
   assert.deepEqual(publicEmailStatus(after), { state: 'sent', to: 'a••••••••@example.com' });
 });
 
-test('the stored report is returned unchanged without calling Claude again', async () => {
+test('the stored report is returned unchanged without calling the AI again', async () => {
   const h = harness();
   const { deps } = await h.build();
   const s = submission();

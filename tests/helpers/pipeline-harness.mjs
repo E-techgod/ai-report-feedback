@@ -42,7 +42,7 @@ export function harness({
             return {
               narrative: {
                 ...fallbackNarrative(model),
-                executiveSummary: 'Texto redactado por Claude.',
+                executiveSummary: 'Texto redactado por IA.',
               },
               source: 'ai',
               failureReason: null,
