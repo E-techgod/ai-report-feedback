@@ -7,6 +7,7 @@ import {
   GenerationInProgressError,
   createReport,
   deliverReportEmail,
+  RecipientLimitError,
   maskEmail,
   processDueEmails,
   publicEmailStatus,
@@ -306,4 +307,24 @@ test('processDueEmails recovers reports whose email was never attempted (e.g. in
 test('maskEmail hides the local part', () => {
   assert.equal(maskEmail('ab@x.com'), 'a•@x.com');
   assert.equal(maskEmail('a@x.com'), 'a•@x.com');
+});
+
+test('a recipient address cannot be used to request unlimited reports', async () => {
+  const h = harness();
+  const { deps } = await h.build();
+  const limit = DEFAULT_CONFIG.maxReportsPerEmailPerDay;
+  for (let i = 0; i < limit; i += 1) {
+    const yes = Object.keys(answersOf([])).slice(0, i + 1);
+    await createReport(deps, submission({ answers: answersOf(yes) }));
+  }
+  await assert.rejects(
+    () => createReport(deps, submission({ answers: answersOf(['B10', 'B9']) })),
+    RecipientLimitError,
+  );
+  // retries of an existing report are unaffected
+  const again = await createReport(
+    deps,
+    submission({ answers: answersOf(Object.keys(answersOf([])).slice(0, 1)) }),
+  );
+  assert.equal(again.created, false);
 });

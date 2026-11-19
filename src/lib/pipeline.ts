@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { buildEmail, pdfFilename, type Mailer } from './email';
 import {
   buildFinalReport,
+  emailKey,
   submissionFingerprint,
   type FinalReport,
   type NarrativeOutcome,
@@ -30,6 +31,8 @@ export type PipelineConfig = {
   dedupeWindowMs: number;
   /** In-flight generation lock; must outlast one generation (AI budget + persistence). */
   generationLockSeconds: number;
+  /** Caps new reports (and therefore emails) per recipient address per 24 h. */
+  maxReportsPerEmailPerDay: number;
 };
 
 export const DEFAULT_CONFIG: Omit<PipelineConfig, 'bookingUrl' | 'emailEnabled' | 'siteUrl'> = {
@@ -39,6 +42,7 @@ export const DEFAULT_CONFIG: Omit<PipelineConfig, 'bookingUrl' | 'emailEnabled' 
   backoffMs: [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000],
   dedupeWindowMs: 10 * 60_000,
   generationLockSeconds: 90,
+  maxReportsPerEmailPerDay: 5,
 };
 
 export type PipelineDeps = {
@@ -55,6 +59,9 @@ const clock = (deps: PipelineDeps) => (deps.now ?? (() => new Date()))();
 
 /** Another request for the same person/answers is generating the report right now. */
 export class GenerationInProgressError extends Error {}
+
+/** Too many new reports requested for the same recipient address. */
+export class RecipientLimitError extends Error {}
 
 /**
  * Creates (or returns the existing) finalized report for a submission.
@@ -83,6 +90,10 @@ export async function createReport(
     if (raced) return { record: raced, created: false };
     throw new GenerationInProgressError();
   }
+
+  // Only genuinely new reports count, so retries and duplicates never consume the allowance.
+  const perEmail = await store.hit(`email:${emailKey(email)}`, 86_400, now);
+  if (perEmail > config.maxReportsPerEmailPerDay) throw new RecipientLimitError();
 
   const model = buildReportModel(submission.answers);
   const outcome = await deps.generateNarrative(model);
