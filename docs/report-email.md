@@ -123,41 +123,72 @@ no schema change.
 - The sweep endpoint is safe to call by hand or concurrently (atomic claims), so an operator can
   recover stuck sends with the `CRON_SECRET` bearer.
 
-## Legacy Apps Script (not touched)
+## Email audit: which implementation produces which email
 
-`enviarCorreosPendientes()` has **not** been reviewed: its source has not been provided, and
-`scripts/apps-script-test-one-row.gs` is only a reconstruction. Nothing in this change installs,
-edits or removes any trigger.
+|                       | Legacy Apps Script                                                                                                | Resend (this app)                                                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Where                 | `enviarCorreosPendientes()` in the Sheet's Apps Script project (source supplied by the owner)                     | `src/lib/email.ts` → `buildEmail()`, sent by `src/lib/pipeline.ts`                                                            |
+| Data source           | `Dashboard` tab formulas + raw `Respuestas de formulario 1` row (same row number assumed)                         | The finalized `FinalReport` stored in Neon. Never regenerated for email                                                       |
+| Content               | Subject from a Dashboard cell; plain text + pie chart; 5 hardcoded recommendations (max 3); `calendario-jag` link | Concise branded summary: greeting, score + level, main finding, priority area, next step, attached-PDF notice, booking button |
+| Attachment            | None                                                                                                              | The PDF rendered from the same stored report as the website download (same file name)                                         |
+| Sent flag             | Writes "Enviado" + timestamp in Dashboard columns H–I                                                             | `reports.email_status` + `report_email_events`, Resend webhook                                                                |
+| Idempotency / retries | None: no lock, marks after each send                                                                              | Atomic claim, `report-email/<id>` key, bounded retries, 47 h window                                                           |
 
-Facts that matter for the migration:
+The **legacy script is the one that produces the separate, different email.** The Resend email is built from
+the same `buildReportContent()` as the web view and the PDF. Its three highlight lines are the top stored
+priority's `finding`, `title` and `action` (or the report's own "nothing to strengthen" message), and it never
+says anything about AI authorship (the PDF carries the "how this report was made" note, which already
+distinguishes AI-assisted from template reports).
 
-- Rows appended through the Sheets API do **not** fire `onFormSubmit`. A legacy `onFormSubmit` trigger
-  therefore only emails real Google Forms submissions.
-- If a **time-driven** trigger polls the Dashboard for rows without "Enviado", it will also email rows
-  written by this app. That would already be happening with the current production flow, so check
-  _Apps Script → Triggers_ before anything else.
+## Legacy Apps Script: documented, NOT touched
+
+Nothing in this repo installs, edits or removes any trigger or any part of the legacy script.
+
+What the supplied `enviarCorreosPendientes()` does:
+
+- Iterates over **every** `Dashboard` row (`getMaxRows()`); skips rows with no email, an invalid email, or
+  column H = "Enviado".
+- For every other row it sends a Gmail message (`GmailApp.sendEmail`) and then writes "Enviado" + a timestamp.
+- It creates no trigger itself. Whether it runs by itself depends on triggers installed in the Apps Script UI.
+
+Impact on the new flow (**blocker for production activation**):
+
+- This app appends to `Respuestas de formulario 1`, and the Dashboard formulas read that tab. Every app
+  submission therefore appears in the Dashboard with an email and no "Enviado", so **any** run of the legacy
+  function (time-driven trigger, manual run, or a future trigger) emails it, in addition to the Resend email.
+- Rows appended through the Sheets API do not fire `onFormSubmit`: a form-submit trigger alone would not pick
+  them up. A time-driven trigger would.
+- The legacy function has no lock, and marks "Enviado" only after sending, so overlapping runs or a crash
+  between send and mark can duplicate emails on their own.
+- Unused code: `mensaje` (column F) and `textoRecomendaciones` are computed but never used.
+
+**Still unknown:** the installed triggers (Apps Script → Triggers). Until they are listed, "no duplicate legacy
+messages" cannot be verified.
 
 Proposed migration (each step needs approval):
 
-1. Provide the real `enviarCorreosPendientes()` and the list of installed triggers.
-2. Add a guard so the legacy sender skips rows created by this app (e.g. a marker the app writes, or
-   the legacy script ignoring rows whose id exists in `reports`). Test on one `PRUEBA` row.
-3. Create the Neon database, run `npm run db:migrate`, set the Resend/Vercel variables with
-   `REPORT_EMAIL_ENABLED=false`, deploy, and verify `/api/questionnaire` end to end (report only).
-4. Send one real test submission to an address you control with `REPORT_EMAIL_ENABLED=true`
-   (preview/staging deployment first). Check the inbox, the PDF, `accepted` → `delivered`.
+1. List the installed triggers and which function each calls.
+2. Add a guard so the legacy sender skips rows created by this app (e.g. a marker the app writes to the sent
+   column, or the legacy script ignoring ids that exist in `reports`). Test on one `PRUEBA` row. This writes to
+   the production Sheet, so it is **not** done in this change.
+3. Run `npm run db:migrate` (done on Neon), set Resend/Vercel variables with `REPORT_EMAIL_ENABLED=false`,
+   deploy, and verify `/api/questionnaire` end to end (report only).
+4. Send one real test submission to an address you control with `REPORT_EMAIL_ENABLED=true` (preview first).
+   Check the inbox, the PDF attachment, `accepted` → `delivered`.
 5. Enable in production. Keep the legacy Forms workflow untouched for Forms submissions.
 
 ## Verification matrix
 
-| Scenario                                                | Covered by                                                             |
-| ------------------------------------------------------- | ---------------------------------------------------------------------- |
-| Submission → report → email with PDF, correct recipient | `tests/pipeline.test.mjs` (success, recipient)                         |
-| Web ↔ PDF identical content                             | `tests/pdf.test.mjs` (text extracted from the real PDF)                |
-| Booking URL consistent                                  | `tests/pdf.test.mjs` (content, email, PDF link annotation)             |
-| Duplicates, retries, races                              | `tests/pipeline.test.mjs`, `tests/store.test.mjs` (real SQL on PGlite) |
-| AI timeout/failure                                      | `tests/pipeline.test.mjs`, `tests/narrative.test.mjs`                  |
-| Email provider failure / lost response                  | `tests/pipeline.test.mjs`, `tests/email.test.mjs`                      |
-| Webhook signature                                       | `tests/email.test.mjs`                                                 |
-| No duplicate legacy messages                            | **Not verifiable** until the legacy script and triggers are reviewed.  |
-| Against real Neon + Resend + production Sheets          | **Not run**: needs credentials and approval.                           |
+| Scenario                                                | Covered by                                                              |
+| ------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Submission → report → email with PDF, correct recipient | `tests/pipeline.test.mjs` (success, recipient)                          |
+| Web ↔ PDF identical content                             | `tests/pdf.test.mjs` (text extracted from the real PDF)                 |
+| Booking URL consistent                                  | `tests/pdf.test.mjs` (content, email, PDF link annotation)              |
+| Duplicates, retries, races                              | `tests/pipeline.test.mjs`, `tests/store.test.mjs` (real SQL on PGlite)  |
+| AI timeout/failure                                      | `tests/pipeline.test.mjs`, `tests/narrative.test.mjs`                   |
+| Email provider failure / lost response                  | `tests/pipeline.test.mjs`, `tests/email.test.mjs`                       |
+| Webhook signature                                       | `tests/email.test.mjs`                                                  |
+| Email = concise summary from the stored report          | `tests/email.test.mjs` (html + plain text, empty and AI/template cases) |
+| Email, PDF and web share one stored report              | `tests/pipeline.test.mjs` (real PDF text vs email, no regeneration)     |
+| No duplicate legacy messages                            | **Not verifiable** until the Apps Script triggers are listed.           |
+| Against real Neon + Resend + production Sheets          | **Not run**: needs credentials and approval.                            |
