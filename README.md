@@ -46,6 +46,31 @@ One **finalized report** is built on the server per submission, stored in Postgr
 
 Setup: create a Neon database, set the variables in `.env.example`, then run `npm run db:migrate` once.
 
+## Environment sync (local `.env` → Vercel Production)
+
+`npm run env:sync:production` copies an explicit allowlist of variables from your local `.env` to Vercel **Production** using the official Vercel CLI. It never deploys.
+
+**One-time setup:** `npm i -g vercel`, `vercel login`, then `vercel link` in this folder (creates the git-ignored `.vercel/`). Set `VERCEL_BIN` if the CLI is not on your `PATH`.
+
+```bash
+npm run env:sync:production -- --dry-run   # names + operations only; modifies nothing
+npm run env:sync:production                # shows the plan, then asks you to type "sync production"
+npm run env:sync:production -- --only EMAIL_FROM,RESEND_API_KEY   # a subset of the allowlist
+```
+
+Other options: `--offline` (skip the read-only `vercel env ls`, operations show as `upsert`) and `--env-file <path>`.
+
+What it does, and what it guarantees:
+
+- **Allowlist only:** `GOOGLE_SHEET_ID`, `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `REPORT_TOKEN_SECRET`, `CRON_SECRET`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `APP_URL`, `NEXT_PUBLIC_BOOKING_URL` (list in `scripts/lib/env-sync.ts`). Missing or empty local values are skipped, never written as blanks.
+- **Never synced, on purpose:** `REPORT_EMAIL_ENABLED` (the email master switch is flipped deliberately in the Vercel dashboard, never as a side effect of copying a file), `DATABASE_URL*` (owned by the Neon integration) and the legacy `GOOGLE_SHEETS_WEBHOOK_*`. Asking for one with `--only` is an error.
+- **Create or update:** a variable missing in Production is created; an existing one is overwritten (`vercel env add … --force`). Nothing is ever removed, so every other Production variable is preserved.
+- **No secret exposure:** values reach the CLI through its **stdin**, never argv, a shell command, a log or the plan (which shows `<hidden>`). The `.env` is not loaded into the process environment, and any CLI error output is redacted before it is printed.
+- **Confirmation:** applying requires typing `sync production` in an interactive terminal; piped or CI runs are refused. Dry run never writes.
+- **Protected source:** the run aborts if the env file is tracked by git or not git-ignored. `.gitignore` ignores `.env` and every `.env.*` variant (`.env.local`, `.env.production`, …) except the `.env.example` template, plus `.vercel/`, `.neon` and `*.pem`.
+- **No deployment:** Vercel applies new values only to the next deployment, so **redeploy Production afterwards**. Changing `REPORT_TOKEN_SECRET` invalidates existing report links, and `CRON_SECRET` must match the Vercel Cron configuration; the plan flags both.
+- **If a write fails** the run stops, names the variables already written, and exits non-zero; re-running is safe because writes are idempotent.
+
 ## Booking
 
 Set `NEXT_PUBLIC_BOOKING_URL` to the real, published Google Appointment Schedule booking page. The client CTA opens it in a separate tab (no Calendar API/OAuth required). Test actual availability and confirmation with the calendar owner.
