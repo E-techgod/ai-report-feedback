@@ -84,5 +84,22 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
         updatedRange: data.updates?.updatedRange ?? '',
       };
     },
+
+    async writeCells(rowNumber, cells) {
+      const { data } = await sheets.spreadsheets.values.batchUpdate(
+        {
+          spreadsheetId,
+          requestBody: {
+            valueInputOption: 'USER_ENTERED',
+            data: cells.map(({ index, value }) => ({
+              range: `${tab}!${columnLetter(index)}${rowNumber}`,
+              values: [[value]],
+            })),
+          },
+        },
+        options,
+      );
+      return data.totalUpdatedCells ?? 0;
+    },
   };
 }

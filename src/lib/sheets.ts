@@ -30,6 +30,11 @@ export interface SheetsGateway {
   appendRow(
     row: string[],
   ): Promise<{ updatedRows: number; updatedCells: number; updatedRange: string }>;
+  /** Writes only the named tracking cells in an existing response row. */
+  writeCells(
+    rowNumber: number,
+    cells: Array<{ index: number; value: string | number }>,
+  ): Promise<number>;
 }
 
 export type SubmitStatus = 'created' | 'duplicate';
