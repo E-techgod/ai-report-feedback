@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_CONFIG } from '../../src/lib/pipeline.ts';
-import { fallbackNarrative } from '../../src/lib/report.ts';
 import { answersOf, freshStore, SAMPLE_YES } from './fixtures.mjs';
 
 export const T0 = new Date('2026-11-18T15:00:00Z').getTime();
@@ -41,8 +40,9 @@ export function harness({
             narrativeCalls.push(model);
             return {
               narrative: {
-                ...fallbackNarrative(model),
                 executiveSummary: 'Texto redactado por IA.',
+                // Short AI text, as the prompt limits require (<= 15% of the visible words).
+                priorityContexts: model.priorities.map(() => 'Contexto breve.'),
               },
               source: 'ai',
               failureReason: null,

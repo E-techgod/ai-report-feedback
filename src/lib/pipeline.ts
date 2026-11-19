@@ -7,7 +7,8 @@ import {
   type FinalReport,
   type NarrativeOutcome,
 } from './final-report';
-import { buildReportModel, type ReportModel } from './report';
+import { MAX_AI_SHARE, aiShare } from './ai-share';
+import { buildReportModel, fallbackNarrative, type ReportModel } from './report';
 import { normalizeEmail } from './sheets';
 import { safeError, type EmailStatus, type ReportRecord, type ReportStore } from './store';
 import type { Submission } from './validation';
@@ -155,15 +156,28 @@ export async function createReport(
 
   const model = buildReportModel(submission.answers);
   const outcome = await deps.generateNarrative(model);
-  const report = buildFinalReport({
-    reportId: (deps.newId ?? randomUUID)(),
-    submissionId: submission.id,
-    firstName: submission.firstName.trim(),
-    answers: submission.answers,
-    outcome,
-    bookingUrl: config.bookingUrl,
-    now: clock(deps),
-  });
+  const reportId = (deps.newId ?? randomUUID)();
+  const build = (narrativeOutcome: NarrativeOutcome) =>
+    buildFinalReport({
+      reportId,
+      submissionId: submission.id,
+      firstName: submission.firstName.trim(),
+      answers: submission.answers,
+      outcome: narrativeOutcome,
+      bookingUrl: config.bookingUrl,
+      now: clock(deps),
+    });
+  let report = build(outcome);
+  // Hard guard: AI text may never exceed 15% of the visible report. If it does (a provider
+  // ignoring the word limits), the report is finalized with the approved template text instead.
+  if (report.narrativeSource === 'ai' && aiShare(report) > MAX_AI_SHARE) {
+    console.warn('[narrative] AI share above limit: using template text');
+    report = build({
+      narrative: fallbackNarrative(model),
+      source: 'template',
+      failureReason: 'ai-share-exceeded',
+    });
+  }
   const saved = await store.insertReport({
     report,
     email,

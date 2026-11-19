@@ -1,12 +1,6 @@
-import {
-  MAX_CONTEXT_WORDS,
-  MAX_SUMMARY_WORDS,
-  buildAiInput,
-  fallbackNarrative,
-  validateNarrative,
-  type ReportModel,
-} from './report';
+import { buildAiInput, fallbackNarrative, validateNarrative, type ReportModel } from './report';
 import type { NarrativeOutcome } from './final-report';
+import { DEFAULT_LIMITS, aiWordLimits, promptWordTarget, type AiWordLimits } from './ai-share';
 
 /**
  * Writes the 4 AI text slots (executive summary + one short context per priority) with the
@@ -47,7 +41,11 @@ export type NarrativeConfig = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-export function systemPrompt(priorityCount: number, delivery: 'tool' | 'json' = 'tool'): string {
+export function systemPrompt(
+  priorityCount: number,
+  delivery: 'tool' | 'json' = 'tool',
+  limits: AiWordLimits = DEFAULT_LIMITS,
+): string {
   const how =
     delivery === 'tool'
       ? `llamando a la herramienta ${TOOL_NAME}`
@@ -56,7 +54,7 @@ export function systemPrompt(priorityCount: number, delivery: 'tool' | 'json' = 
     'Eres un redactor de Quirón especializado en diagnóstico patrimonial orientativo; NO das asesoría legal, financiera ni fiscal.',
     'Recibirás resultados YA calculados por reglas. Tu única tarea es redactar texto breve que los explique.',
     'No cambies ni recalcules el score ni el nivel. No agregues cifras, diagnósticos, riesgos, prioridades, coberturas, pólizas, situación familiar ni acciones nuevas. No modifiques las acciones indicadas.',
-    `Entrega el resultado ${how}: executiveSummary (un párrafo de máximo ${MAX_SUMMARY_WORDS} palabras que interprete los hallazgos) y priorityContexts (arreglo con EXACTAMENTE ${priorityCount} textos, uno por prioridad y en el mismo orden, cada uno de máximo ${MAX_CONTEXT_WORDS} palabras que expliquen por qué ese hallazgo merece atención).`,
+    `Entrega el resultado ${how}: executiveSummary (un párrafo de máximo ${promptWordTarget(limits.summary)} palabras que interprete los hallazgos) y priorityContexts (arreglo con EXACTAMENTE ${priorityCount} textos, uno por prioridad y en el mismo orden, cada uno de máximo ${promptWordTarget(limits.context)} palabras que expliquen por qué ese hallazgo merece atención).`,
     'Español mexicano profesional, claro y amable. Recomienda contrastar con documentación vigente y con un especialista, sin alarmismo.',
   ].join(' ');
 }
@@ -90,7 +88,7 @@ type ProviderAdapter = {
   /** Names of the server-side environment variables holding this provider's credentials. */
   env: { apiKey: string; model: string };
   headers: (apiKey: string) => Record<string, string>;
-  body: (modelId: string, model: ReportModel) => unknown;
+  body: (modelId: string, model: ReportModel, limits: AiWordLimits) => unknown;
   /** Locates the (still unvalidated) JSON candidate inside the provider response. */
   extract: (data: unknown) => unknown;
 };
@@ -104,10 +102,10 @@ const anthropic: ProviderAdapter = {
     'x-api-key': apiKey,
     'anthropic-version': '2023-06-01',
   }),
-  body: (modelId, model) => ({
+  body: (modelId, model, limits) => ({
     model: modelId,
     max_tokens: 800,
-    system: systemPrompt(model.priorities.length),
+    system: systemPrompt(model.priorities.length, 'tool', limits),
     tools: [toolDefinition(model.priorities.length)],
     tool_choice: { type: 'tool', name: TOOL_NAME },
     messages: [{ role: 'user', content: JSON.stringify(buildAiInput(model)) }],
@@ -146,7 +144,7 @@ const groq: ProviderAdapter = {
     'content-type': 'application/json',
     authorization: `Bearer ${apiKey}`,
   }),
-  body: (modelId, model) => ({
+  body: (modelId, model, limits) => ({
     model: modelId,
     temperature: 0.2,
     max_completion_tokens: 2048,
@@ -157,7 +155,7 @@ const groq: ProviderAdapter = {
       json_schema: { name: GROQ_SCHEMA_NAME, strict: true, schema: groqResponseSchema() },
     },
     messages: [
-      { role: 'system', content: systemPrompt(model.priorities.length, 'json') },
+      { role: 'system', content: systemPrompt(model.priorities.length, 'json', limits) },
       { role: 'user', content: JSON.stringify(buildAiInput(model)) },
     ],
   }),
@@ -190,6 +188,7 @@ async function attempt(
   model: ReportModel,
   cfg: Required<Pick<NarrativeConfig, 'apiKey' | 'modelId'>> & {
     adapter: ProviderAdapter;
+    limits: AiWordLimits;
     fetchImpl: typeof fetch;
   },
   timeoutMs: number,
@@ -202,7 +201,7 @@ async function attempt(
       method: 'POST',
       signal: controller.signal,
       headers: cfg.adapter.headers(cfg.apiKey),
-      body: JSON.stringify(cfg.adapter.body(cfg.modelId, model)),
+      body: JSON.stringify(cfg.adapter.body(cfg.modelId, model, cfg.limits)),
     });
     if (response.status === 429) {
       // Never read or log the body: only the pause the provider asks for.
@@ -213,7 +212,11 @@ async function attempt(
     if (!response.ok) {
       return { ok: false, reason: `http-${response.status}`, retryable: response.status >= 500 };
     }
-    const narrative = validateNarrative(cfg.adapter.extract(await response.json()), count);
+    const narrative = validateNarrative(
+      cfg.adapter.extract(await response.json()),
+      count,
+      cfg.limits,
+    );
     if (!narrative) return { ok: false, reason: 'invalid-output', retryable: true };
     return { ok: true, narrative };
   } catch (error) {
@@ -244,6 +247,8 @@ export async function generateNarrative(
   const modelId = config.modelId ?? (process.env[adapter.env.model] || adapter.defaultModel);
   if (!apiKey || !modelId) return template('not-configured');
 
+  // Keeps AI text within 15% of the visible report (see ai-share.ts).
+  const limits = aiWordLimits(model);
   const fetchImpl = config.fetchImpl ?? fetch;
   const attemptTimeout = config.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS;
   const budget = config.totalBudgetMs ?? TOTAL_BUDGET_MS;
@@ -256,7 +261,7 @@ export async function generateNarrative(
     if (remaining < 1000) break;
     const result = await attempt(
       model,
-      { adapter, apiKey, modelId, fetchImpl },
+      { adapter, apiKey, modelId, fetchImpl, limits },
       Math.min(attemptTimeout, remaining),
     );
     if (result.ok) return { narrative: result.narrative, source: 'ai', failureReason: null };
