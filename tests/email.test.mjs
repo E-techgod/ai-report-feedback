@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import {
@@ -173,7 +174,7 @@ test('email html is email-safe: table layout, inline styles, no scripts, flex/gr
   );
   assert.doesNotMatch(html, /url\(/i);
   assert.equal([...html.matchAll(/<img /g)].length, 1);
-  assert.match(html, /<img [^>]*alt="Quirón/);
+  assert.match(html, /<img [^>]*alt="Quirón"/);
   assert.match(html, /<table role="presentation"/);
 });
 
@@ -352,4 +353,71 @@ test('webhook payload mapping', () => {
   });
   assert.equal(parseWebhookEvent('{"type":"email.opened","data":{"email_id":"em_9"}}'), null);
   assert.equal(parseWebhookEvent('not json'), null);
+});
+
+const LOGO_PNG = new URL('../public/images/quiron-logo.png', import.meta.url);
+const logoTag = (html) => html.match(/<img [^>]*>/)?.[0] ?? '';
+
+test('the logo is the existing PNG as an absolute HTTPS <img> with its aspect ratio preserved', () => {
+  const png = readFileSync(LOGO_PNG);
+  assert.equal(png.subarray(1, 4).toString(), 'PNG', 'public/images/quiron-logo.png is a PNG');
+  const [pxWidth, pxHeight] = [png.readUInt32BE(16), png.readUInt32BE(20)];
+
+  const { html } = buildEmail(sampleReport({ source: 'ai' }), {
+    siteUrl: 'https://app.example.com/',
+  });
+  const tag = logoTag(html);
+  assert.match(tag, /^<img src="https:\/\/app\.example\.com\/images\/quiron-logo\.png" /);
+  assert.match(tag, / alt="Quirón" /);
+  const width = Number(tag.match(/ width="(\d+)"/)?.[1]);
+  const height = Number(tag.match(/ height="(\d+)"/)?.[1]);
+  assert.ok(width >= 100 && width <= 200, `display width ${width}px suits a 640px email`);
+  assert.ok(
+    Math.abs(height - (width * pxHeight) / pxWidth) <= 1,
+    `${width}x${height} keeps the ${pxWidth}x${pxHeight} ratio`,
+  );
+  // Email-compatible inline styles: block image, no border, fluid height, never wider than its cell.
+  for (const rule of [
+    'display:block',
+    'border:0',
+    `width:${width}px`,
+    'max-width:100%',
+    'height:auto',
+  ])
+    assert.ok(tag.includes(rule), `inline style ${rule}`);
+  // Plain <img>: no Next.js Image output, no relative, localhost or filesystem source.
+  assert.doesNotMatch(tag, /srcset|_next\/image|loading=|decoding=|data-nimg/i);
+  assert.equal(
+    [...html.matchAll(/src="([^"]+)"/g)].every(([, src]) => src.startsWith('https://')),
+    true,
+  );
+  assert.doesNotMatch(html, /localhost|127\.0\.0\.1|file:|src="\//);
+  // The old text wordmark is only a fallback, never rendered next to the image.
+  assert.ok(!html.includes('QUIRÓN<span'));
+});
+
+test('only a public HTTPS site URL produces an image; anything else uses the text fallback', () => {
+  const report = sampleReport({ source: 'ai' });
+  for (const siteUrl of [
+    null,
+    '',
+    'http://app.example.com',
+    'https://localhost:3000',
+    'http://localhost:3000',
+    'https://127.0.0.1',
+    'https://192.168.1.20',
+    'https://intranet',
+    '/images/quiron-logo.png',
+    'images/quiron-logo.png',
+    'file:///Users/me/quiron-logo.png',
+    'javascript:alert(1)',
+    'https://user:pass@app.example.com',
+  ]) {
+    const { html } = buildEmail(report, { siteUrl });
+    assert.ok(!html.includes('<img'), `no image for ${JSON.stringify(siteUrl)}`);
+    assert.ok(html.includes('QUIRÓN'), 'text fallback keeps a brand mark');
+  }
+  // A path or trailing slash on the configured URL never leaks into the image URL.
+  const { html } = buildEmail(report, { siteUrl: 'https://app.example.com/some/path/' });
+  assert.match(logoTag(html), /src="https:\/\/app\.example\.com\/images\/quiron-logo\.png"/);
 });
