@@ -21,6 +21,7 @@ const PRESETS = [
 const EMAIL_STATES: Array<{ label: string; value: EmailStatusView | null }> = [
   { label: 'Correo: sin línea', value: null },
   { label: 'Correo: enviando', value: { state: 'sending', to: 'a••@ejemplo.com' } },
+  { label: 'Correo: reintentando', value: { state: 'retrying', to: 'a••@ejemplo.com' } },
   { label: 'Correo: enviado', value: { state: 'sent', to: 'a••@ejemplo.com' } },
   { label: 'Correo: rebotó', value: { state: 'bounced', to: 'a••@ejemplo.com' } },
   { label: 'Correo: falló', value: { state: 'failed', to: 'a••@ejemplo.com' } },

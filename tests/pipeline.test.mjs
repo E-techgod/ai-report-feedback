@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { MailError } from '../src/lib/email.ts';
 import {
   DEFAULT_CONFIG,
@@ -13,69 +12,8 @@ import {
   publicEmailStatus,
 } from '../src/lib/pipeline.ts';
 import { fallbackNarrative } from '../src/lib/report.ts';
-import { answersOf, freshStore, SAMPLE_YES } from './helpers/fixtures.mjs';
-
-const T0 = new Date('2026-11-18T15:00:00Z').getTime();
-
-function harness({ narrative, mailerBehavior, emailEnabled = true, withMailer = true } = {}) {
-  const clock = { t: T0 };
-  const sent = [];
-  let calls = 0;
-  const narrativeCalls = [];
-  const mailer = withMailer
-    ? {
-        async send(message) {
-          if (mailerBehavior) await mailerBehavior(message, calls++);
-          sent.push(message);
-          return { messageId: `em_${sent.length}` };
-        },
-      }
-    : null;
-  return {
-    clock,
-    sent,
-    narrativeCalls,
-    async build() {
-      const store = await freshStore();
-      const deps = {
-        store,
-        mailer,
-        now: () => new Date(clock.t),
-        generateNarrative:
-          narrative ??
-          (async (model) => {
-            narrativeCalls.push(model);
-            return {
-              narrative: {
-                ...fallbackNarrative(model),
-                executiveSummary: 'Texto redactado por Claude.',
-              },
-              source: 'ai',
-              failureReason: null,
-            };
-          }),
-        renderPdf: async () => Buffer.from('%PDF-fake'),
-        config: {
-          ...DEFAULT_CONFIG,
-          bookingUrl: 'https://example.com/cita',
-          emailEnabled,
-          siteUrl: null,
-        },
-      };
-      return { store, deps };
-    },
-  };
-}
-
-const submission = (over = {}) => ({
-  id: randomUUID(),
-  firstName: 'Ana',
-  lastName: 'Pérez',
-  email: 'Ana.Perez@Example.com',
-  privacyAccepted: true,
-  answers: answersOf(SAMPLE_YES),
-  ...over,
-});
+import { answersOf } from './helpers/fixtures.mjs';
+import { harness, submission } from './helpers/pipeline-harness.mjs';
 
 test('success: one report, one email to the stored address with the PDF attached', async () => {
   const h = harness();
@@ -184,8 +122,8 @@ test('provider failure: retryable error is retried later with the SAME idempoten
   assert.equal((await store.getById(record.id)).emailStatus, 'failed');
   assert.equal(
     publicEmailStatus(await store.getById(record.id)).state,
-    'sending',
-    'retry pending, not shown as failed',
+    'retrying',
+    'retry pending: not shown as sending and not shown as failed',
   );
 
   assert.equal(
@@ -215,7 +153,13 @@ test('provider failure: a permanent error is final, shown as failed, and never r
   assert.equal(publicEmailStatus(after).state, 'failed');
   h.clock.t += 3 * 3_600_000;
   assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'not-claimed');
-  assert.deepEqual(await processDueEmails(deps), { due: 0, accepted: 0, failed: 0, skipped: 0 });
+  assert.deepEqual(await processDueEmails(deps), {
+    expired: 0,
+    due: 0,
+    accepted: 0,
+    failed: 0,
+    skipped: 0,
+  });
 });
 
 test('provider failure: attempts are bounded', async () => {
@@ -228,7 +172,7 @@ test('provider failure: attempts are bounded', async () => {
   const { record } = await createReport(deps, submission());
   for (let i = 0; i < 8; i += 1) {
     await deliverReportEmail(deps, record.id);
-    h.clock.t += 2 * 3_600_000 > DEFAULT_CONFIG.maxAgeMs ? 0 : 61 * 60_000;
+    h.clock.t += 61 * 60_000;
   }
   const after = await store.getById(record.id);
   assert.equal(after.emailAttempts, DEFAULT_CONFIG.maxAttempts);
@@ -287,7 +231,13 @@ test('email disabled or no mailer: report works, status is disabled, nothing is 
     const { record } = await createReport(deps, submission());
     assert.equal(record.emailStatus, 'disabled');
     assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'not-claimed');
-    assert.deepEqual(await processDueEmails(deps), { due: 0, accepted: 0, failed: 0, skipped: 0 });
+    assert.deepEqual(await processDueEmails(deps), {
+      expired: 0,
+      due: 0,
+      accepted: 0,
+      failed: 0,
+      skipped: 0,
+    });
     assert.equal(h.sent.length, 0);
     assert.equal(publicEmailStatus(await store.getById(record.id)).state, 'off');
   }
@@ -298,9 +248,21 @@ test('processDueEmails recovers reports whose email was never attempted (e.g. in
   const { deps } = await h.build();
   const a = await createReport(deps, submission());
   const b = await createReport(deps, submission({ email: 'otro@example.com' }));
-  assert.deepEqual(await processDueEmails(deps), { due: 2, accepted: 2, failed: 0, skipped: 0 });
+  assert.deepEqual(await processDueEmails(deps), {
+    expired: 0,
+    due: 2,
+    accepted: 2,
+    failed: 0,
+    skipped: 0,
+  });
   assert.deepEqual(h.sent.map((m) => m.to).sort(), ['ana.perez@example.com', 'otro@example.com']);
-  assert.deepEqual(await processDueEmails(deps), { due: 0, accepted: 0, failed: 0, skipped: 0 });
+  assert.deepEqual(await processDueEmails(deps), {
+    expired: 0,
+    due: 0,
+    accepted: 0,
+    failed: 0,
+    skipped: 0,
+  });
   assert.ok(a.record.id && b.record.id);
 });
 
