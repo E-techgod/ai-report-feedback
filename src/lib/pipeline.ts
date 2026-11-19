@@ -57,6 +57,8 @@ export const DEFAULT_CONFIG: Omit<PipelineConfig, 'bookingUrl' | 'emailEnabled' 
 
 export type PipelineDeps = {
   store: ReportStore;
+  /** Best-effort projection of the latest Neon state into the linked Sheet row. */
+  syncTracking?: (reportId: string) => Promise<boolean>;
   generateNarrative: (model: ReportModel) => Promise<NarrativeOutcome>;
   renderPdf: (report: FinalReport) => Promise<Buffer>;
   mailer: Mailer | null;
@@ -80,18 +82,33 @@ export class RecipientLimitError extends Error {}
 export async function createReport(
   deps: PipelineDeps,
   submission: Submission,
+  sheetRowNumber?: number,
 ): Promise<{ record: ReportRecord; created: boolean }> {
   const { store, config } = deps;
   const now = clock(deps);
 
   const byId = await store.getBySubmissionId(submission.id);
-  if (byId) return { record: byId, created: false };
+  if (byId)
+    return {
+      record:
+        sheetRowNumber && !byId.sheetRowNumber
+          ? await store.linkSheetRow(byId.id, sheetRowNumber)
+          : byId,
+      created: false,
+    };
 
   const email = normalizeEmail(submission.email);
   const fingerprint = submissionFingerprint(email, submission.answers);
   const since = new Date(now.getTime() - config.dedupeWindowMs);
   const recent = await store.findRecentByFingerprint(fingerprint, since);
-  if (recent) return { record: recent, created: false };
+  if (recent)
+    return {
+      record:
+        sheetRowNumber && !recent.sheetRowNumber
+          ? await store.linkSheetRow(recent.id, sheetRowNumber)
+          : recent,
+      created: false,
+    };
 
   // Cross-instance lock so two simultaneous requests cannot both generate (and email) a report.
   const holders = await store.hit(`gen:${fingerprint}`, config.generationLockSeconds, now);
@@ -121,8 +138,17 @@ export async function createReport(
     email,
     fingerprint,
     emailStatus: config.emailEnabled && deps.mailer ? 'pending' : 'disabled',
+    sheetRowNumber,
     now: clock(deps),
   });
+}
+
+async function syncSafely(deps: PipelineDeps, reportId: string) {
+  try {
+    await deps.syncTracking?.(reportId);
+  } catch {
+    console.error(`[tracking] report ${reportId}: sync-failed`);
+  }
 }
 
 export type DeliveryResult =
@@ -140,13 +166,14 @@ export async function deliverReportEmail(
   reportId: string,
 ): Promise<DeliveryResult> {
   const { store, config, mailer } = deps;
-  if (!mailer) return { outcome: 'not-claimed' };
+  if (!config.emailEnabled || !mailer) return { outcome: 'not-claimed' };
   const claimed = await store.claimEmail(reportId, clock(deps), {
     maxAttempts: config.maxAttempts,
     leaseMs: config.leaseMs,
     maxAgeMs: config.maxAgeMs,
   });
   if (!claimed) return { outcome: 'not-claimed' };
+  await syncSafely(deps, reportId);
 
   // Retrying past the provider's idempotency window after an unknown outcome could send a second
   // copy. In that case we stop and report a terminal failure instead of guessing.
@@ -159,6 +186,7 @@ export async function deliverReportEmail(
       const reason = 'unknown-outcome-after-idempotency-window';
       console.error(`[email] report ${claimed.id} not retried: ${reason}`);
       await store.markFailed(claimed.id, reason, null, clock(deps));
+      await syncSafely(deps, reportId);
       return { outcome: 'failed', error: reason, willRetry: false };
     }
   }
@@ -191,6 +219,7 @@ export async function deliverReportEmail(
       willRetry ? new Date(clock(deps).getTime() + delay) : null,
       clock(deps),
     );
+    await syncSafely(deps, reportId);
     return { outcome: 'failed', error: message, willRetry };
   }
 
@@ -199,6 +228,7 @@ export async function deliverReportEmail(
   // key, which the provider de-duplicates. The error is rethrown so it stays visible.
   try {
     await store.markAccepted(claimed.id, messageId, clock(deps));
+    await syncSafely(deps, reportId);
   } catch (error) {
     console.error(`[email] report ${claimed.id} accepted but not recorded: ${safeError(error)}`);
     throw error;
@@ -223,7 +253,9 @@ export async function processDueEmails(
     maxAgeMs: config.maxAgeMs,
   };
   const started = Date.now();
+  if (!config.emailEnabled) return { expired: 0, due: 0, accepted: 0, failed: 0, skipped: 0 };
   const expired = await deps.store.expireStale(clock(deps), opts);
+  for (const id of expired) await syncSafely(deps, id);
   const summary = { expired: expired.length, due: 0, accepted: 0, failed: 0, skipped: 0 };
   const seen = new Set<string>();
   while (Date.now() - started < budgetMs) {

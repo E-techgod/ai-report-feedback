@@ -28,6 +28,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (!record) return fail(404);
 
   const pdf = await renderReportPdf(record.report);
+  try {
+    await deps.store.markPdfDownloaded(id, new Date());
+    await deps.syncTracking?.(id);
+  } catch {
+    console.error(`[tracking] report ${id}: sync-failed`);
+  }
   return new NextResponse(new Uint8Array(pdf), {
     status: 200,
     headers: {

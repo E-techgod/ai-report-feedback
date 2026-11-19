@@ -52,36 +52,42 @@ export async function syncReportTracking(
   gateway: SheetsGateway,
   reportId: string,
 ): Promise<boolean> {
-  const schema = parseSheetSchema(await gateway.readHeaders());
-  if (
-    schema.tracking.reportId === undefined ||
-    schema.tracking.reportStatus === undefined ||
-    schema.tracking.emailStatus === undefined
-  )
-    throw new Error('Required report tracking headers are missing');
-  const timeZone = await gateway.getTimeZone();
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const record = await store.getById(reportId);
-    if (!record?.sheetRowNumber) return false;
-    if (record.trackingVersion <= record.sheetSyncedVersion) return false;
-    const row = (await gateway.readRows([record.sheetRowNumber], schema.headers.length))[0];
-    if (!row || normalizeEmail(String(row[schema.email] ?? '')) !== normalizeEmail(record.email))
-      throw new Error('Spreadsheet row email does not match the persisted report');
-    const answers = Object.fromEntries(
-      questionIds.map((id) => [id, foldAnswer(row[schema.questions[id]]) === 'si']),
-    );
+  const claimed = await store.claimSheetSync(reportId, new Date());
+  if (!claimed) return false;
+  try {
+    const schema = parseSheetSchema(await gateway.readHeaders());
     if (
-      questionIds.some((id) => !['si', 'no'].includes(foldAnswer(row[schema.questions[id]]))) ||
-      submissionFingerprint(record.email, answers) !== record.fingerprint
+      schema.tracking.reportId === undefined ||
+      schema.tracking.reportStatus === undefined ||
+      schema.tracking.emailStatus === undefined
     )
-      throw new Error('Spreadsheet row answers do not match the persisted report');
-    const currentId = String(row[schema.tracking.reportId] ?? '').trim();
-    if (currentId && currentId !== record.id)
-      throw new Error('Spreadsheet row belongs to a different report');
-    const cells = trackingCells(record, schema, timeZone);
-    if ((await gateway.writeCells(record.sheetRowNumber, cells)) !== cells.length)
-      throw new Error('Google Sheets did not confirm the tracking write');
-    if (await store.markSheetSynced(record.id, record.trackingVersion)) return true;
+      throw new Error('Required report tracking headers are missing');
+    const timeZone = await gateway.getTimeZone();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const record = await store.getById(reportId);
+      if (!record?.sheetRowNumber) return false;
+      if (record.trackingVersion <= record.sheetSyncedVersion) return false;
+      const row = (await gateway.readRows([record.sheetRowNumber], schema.headers.length))[0];
+      if (!row || normalizeEmail(String(row[schema.email] ?? '')) !== normalizeEmail(record.email))
+        throw new Error('Spreadsheet row email does not match the persisted report');
+      const answers = Object.fromEntries(
+        questionIds.map((id) => [id, foldAnswer(row[schema.questions[id]]) === 'si']),
+      );
+      if (
+        questionIds.some((id) => !['si', 'no'].includes(foldAnswer(row[schema.questions[id]]))) ||
+        submissionFingerprint(record.email, answers) !== record.fingerprint
+      )
+        throw new Error('Spreadsheet row answers do not match the persisted report');
+      const currentId = String(row[schema.tracking.reportId] ?? '').trim();
+      if (currentId && currentId !== record.id)
+        throw new Error('Spreadsheet row belongs to a different report');
+      const cells = trackingCells(record, schema, timeZone);
+      if ((await gateway.writeCells(record.sheetRowNumber, cells)) !== cells.length)
+        throw new Error('Google Sheets did not confirm the tracking write');
+      if (await store.markSheetSynced(record.id, record.trackingVersion)) return true;
+    }
+    return false;
+  } finally {
+    await store.releaseSheetSync(reportId, claimed.sheetSyncLeaseUntil!);
   }
-  return false;
 }

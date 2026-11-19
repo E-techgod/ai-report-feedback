@@ -16,6 +16,7 @@ create table if not exists reports (
   pdf_downloaded_at          timestamptz,
   tracking_version           bigint not null default 1,
   sheet_synced_version       bigint not null default 0,
+  sheet_sync_lease_until     timestamptz,
 
   email_status               text not null check (email_status in
                                ('disabled', 'pending', 'sending', 'accepted', 'delivered',
@@ -36,6 +37,7 @@ alter table reports add column if not exists sheet_row_number int;
 alter table reports add column if not exists pdf_downloaded_at timestamptz;
 alter table reports add column if not exists tracking_version bigint not null default 1;
 alter table reports add column if not exists sheet_synced_version bigint not null default 0;
+alter table reports add column if not exists sheet_sync_lease_until timestamptz;
 create unique index if not exists reports_sheet_row_idx
   on reports (sheet_row_number) where sheet_row_number is not null;
 

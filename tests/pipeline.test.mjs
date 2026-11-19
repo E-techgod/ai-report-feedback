@@ -50,6 +50,19 @@ test('the stored report is returned unchanged without calling Claude again', asy
   assert.equal(h.narrativeCalls.length, 1);
 });
 
+test('a retry links its existing Neon report to the confirmed Sheet row', async () => {
+  const h = harness({ emailEnabled: false });
+  const { deps } = await h.build();
+  const s = submission();
+  const first = await createReport(deps, s);
+  assert.equal(first.record.sheetRowNumber, null);
+  const retry = await createReport(deps, s, 22);
+  assert.equal(retry.created, false);
+  assert.equal(retry.record.sheetRowNumber, 22);
+  assert.equal(retry.record.id, first.record.id);
+  assert.equal(h.narrativeCalls.length, 1);
+});
+
 test('duplicates: same id, same person+answers with a new id, and concurrent calls make ONE report and ONE email', async () => {
   const h = harness();
   const { store, deps } = await h.build();
@@ -241,6 +254,19 @@ test('email disabled or no mailer: report works, status is disabled, nothing is 
     assert.equal(h.sent.length, 0);
     assert.equal(publicEmailStatus(await store.getById(record.id)).state, 'off');
   }
+});
+
+test('master switch stops pending sends and cron until deliberately re-enabled', async () => {
+  const h = harness();
+  const { deps } = await h.build();
+  const { record } = await createReport(deps, submission());
+  deps.config.emailEnabled = false;
+  assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'not-claimed');
+  assert.equal((await processDueEmails(deps)).due, 0);
+  assert.equal(h.sent.length, 0);
+  deps.config.emailEnabled = true;
+  assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'accepted');
+  assert.equal(h.sent.length, 1);
 });
 
 test('processDueEmails recovers reports whose email was never attempted (e.g. instance died)', async () => {

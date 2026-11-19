@@ -1,6 +1,6 @@
 import { after, NextResponse } from 'next/server';
 import { submissionSchema } from '@/lib/validation';
-import { saveSubmission } from '@/lib/sheets';
+import { saveSubmissionWithRow } from '@/lib/sheets';
 import { createGoogleSheetsGateway } from '@/lib/google-sheets-client';
 import { reportAccessToken } from '@/lib/final-report';
 import {
@@ -62,9 +62,12 @@ export async function POST(req: Request) {
   const submission = parsed.data;
 
   // Step 1: the response row. Once Google confirms it, the lead can no longer be lost.
+  let sheetRowNumber: number;
   let duplicate = false;
   try {
-    duplicate = (await saveSubmission(gateway, submission)) === 'duplicate';
+    const saved = await saveSubmissionWithRow(gateway, submission);
+    duplicate = saved.status === 'duplicate';
+    sheetRowNumber = saved.rowNumber;
   } catch (error) {
     // Log only a short message: Google client errors can embed request details.
     const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
@@ -77,7 +80,12 @@ export async function POST(req: Request) {
 
   // Step 2: the finalized report. Safe to retry: the same submission id returns the same report.
   try {
-    const { record } = await createReport(deps, submission);
+    const { record } = await createReport(deps, submission, sheetRowNumber);
+    try {
+      await deps.syncTracking?.(record.id);
+    } catch {
+      console.error(`[tracking] report ${record.id}: sync-failed`);
+    }
     if (record.emailStatus === 'pending') {
       // Runs after the response; the cron sweep recovers it if this instance dies first.
       after(async () => {

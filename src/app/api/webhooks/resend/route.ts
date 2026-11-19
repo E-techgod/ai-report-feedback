@@ -29,6 +29,14 @@ export async function POST(req: Request) {
   const event = parseWebhookEvent(body);
   if (!event) return reply(200); // an event type we do not track
   const known = await deps.store.applyProviderEvent(event.messageId, event.event, new Date());
+  if (known) {
+    try {
+      const record = await deps.store.getByProviderMessageId(event.messageId);
+      if (record) await deps.syncTracking?.(record.id);
+    } catch {
+      console.error('[webhook] tracking sync failed');
+    }
+  }
   // 404 makes the provider retry: the event can arrive before we recorded the message id.
   return reply(known ? 200 : 404);
 }

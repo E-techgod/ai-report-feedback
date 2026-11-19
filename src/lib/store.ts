@@ -32,6 +32,7 @@ export type ReportRecord = {
   pdfDownloadedAt: Date | null;
   trackingVersion: number;
   sheetSyncedVersion: number;
+  sheetSyncLeaseUntil: Date | null;
   emailStatus: EmailStatus;
   emailAttempts: number;
   emailLastAttemptAt: Date | null;
@@ -77,6 +78,7 @@ function toRecord(row: Record<string, unknown>): ReportRecord {
     pdfDownloadedAt: d(row.pdf_downloaded_at),
     trackingVersion: Number(row.tracking_version),
     sheetSyncedVersion: Number(row.sheet_synced_version),
+    sheetSyncLeaseUntil: d(row.sheet_sync_lease_until),
     emailStatus: row.email_status as EmailStatus,
     emailAttempts: Number(row.email_attempts),
     emailLastAttemptAt: d(row.email_last_attempt_at),
@@ -150,6 +152,9 @@ export function createStore(sql: SqlExecutor) {
 
     getById: (id: string) => one('select * from reports where id = $1', [id]),
 
+    getByProviderMessageId: (messageId: string) =>
+      one('select * from reports where email_provider_message_id = $1', [messageId]),
+
     getBySubmissionId: (submissionId: string) =>
       one('select * from reports where submission_id = $1', [submissionId]),
 
@@ -185,10 +190,29 @@ export function createStore(sql: SqlExecutor) {
       return rows.length > 0;
     },
 
+    /** A lease serializes Sheets writes for one report across serverless instances. */
+    claimSheetSync: (id: string, now: Date, leaseMs = 90_000) =>
+      one(
+        `update reports set sheet_sync_lease_until = $2
+         where id = $1 and sheet_row_number is not null
+           and tracking_version > sheet_synced_version
+           and (sheet_sync_lease_until is null or sheet_sync_lease_until < $3)
+         returning *`,
+        [id, new Date(now.getTime() + leaseMs).toISOString(), now.toISOString()],
+      ),
+
+    async releaseSheetSync(id: string, leaseUntil: Date): Promise<void> {
+      await sql(
+        'update reports set sheet_sync_lease_until = null where id = $1 and sheet_sync_lease_until = $2',
+        [id, leaseUntil.toISOString()],
+      );
+    },
+
     async listUnsynced(limit: number): Promise<string[]> {
       const rows = await sql(
         `select id from reports where sheet_row_number is not null
            and tracking_version > sheet_synced_version
+           and (sheet_sync_lease_until is null or sheet_sync_lease_until < now())
          order by created_at asc limit $1`,
         [limit],
       );

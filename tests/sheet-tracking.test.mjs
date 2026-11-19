@@ -26,7 +26,7 @@ const HEADERS = [
 ];
 const AT = new Date('2026-11-18T15:00:00Z');
 
-async function setup({ totals = false } = {}) {
+async function setup({ totals = false, emailStatus = 'disabled' } = {}) {
   const headers = totals ? [...HEADERS, 'Total Reportes', 'Total Emails'] : HEADERS;
   const schema = parseSheetSchema(headers);
   const report = sampleReport();
@@ -56,7 +56,7 @@ async function setup({ totals = false } = {}) {
     report,
     email: 'a@b.com',
     fingerprint: fingerprintOf('a@b.com'),
-    emailStatus: 'disabled',
+    emailStatus,
     sheetRowNumber: 2,
     now: AT,
   });
@@ -78,7 +78,7 @@ test('syncs the persisted report to only named tracking fields; repeated sync ke
 });
 
 test('later PDF and email state updates project without duplicating counts', async () => {
-  const ctx = await setup({ totals: true });
+  const ctx = await setup({ totals: true, emailStatus: 'pending' });
   await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
   await ctx.store.markPdfDownloaded(ctx.record.id, AT);
   const downloaded = await ctx.store.getById(ctx.record.id);
@@ -87,6 +87,20 @@ test('later PDF and email state updates project without duplicating counts', asy
   assert.equal(ctx.sheet[1][ctx.schema.tracking.pdfStatus], 'Descarga iniciada');
   assert.equal(ctx.sheet[1][ctx.schema.tracking.pdfDownloadedAt], '2026-11-18 09:00:00');
   assert.equal(ctx.sheet[1][ctx.schema.tracking.totalReports], 1);
+  await ctx.store.claimEmail(ctx.record.id, AT, {
+    maxAttempts: 5,
+    leaseMs: 60_000,
+    maxAgeMs: 47 * 3600_000,
+  });
+  await ctx.store.markAccepted(ctx.record.id, 'resend_1', AT);
+  await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
+  assert.equal(ctx.sheet[1][ctx.schema.tracking.emailStatus], 'Aceptado');
+  assert.equal(ctx.sheet[1][ctx.schema.tracking.totalEmails], 1);
+  assert.equal(ctx.sheet[1][ctx.schema.tracking.emailAttempts], 1);
+  await ctx.store.applyProviderEvent('resend_1', 'delivered', AT);
+  await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
+  assert.equal(ctx.sheet[1][ctx.schema.tracking.emailStatus], 'Entregado');
+  assert.equal(ctx.sheet[1][ctx.schema.tracking.totalEmails], 1);
 });
 
 test('refuses to overwrite a moved row or a different report id', async () => {
@@ -103,4 +117,28 @@ test('refuses to overwrite a moved row or a different report id', async () => {
     /different report/,
   );
   assert.equal(ctx.calls.length, 0);
+});
+
+test('concurrent syncs use one lease and write the row once', async () => {
+  const ctx = await setup({ totals: true });
+  let started;
+  let release;
+  const entered = new Promise((resolve) => {
+    started = resolve;
+  });
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const originalWrite = ctx.gateway.writeCells;
+  ctx.gateway.writeCells = async (...args) => {
+    started();
+    await gate;
+    return originalWrite(...args);
+  };
+  const first = syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
+  await entered;
+  assert.equal(await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id), false);
+  release();
+  assert.equal(await first, true);
+  assert.equal(ctx.calls.length, 1);
 });
