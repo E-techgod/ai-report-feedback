@@ -42,7 +42,34 @@ export type PipelineConfig = {
   generationLockSeconds: number;
   /** Caps new reports (and therefore emails) per recipient address per 24 h. */
   maxReportsPerEmailPerDay: number;
+  /**
+   * Test gate. When set, ONLY these normalized addresses are ever emailed; every other report is
+   * created as 'disabled' and a send to any other address is refused. null/undefined = no
+   * restriction (the normal production behaviour).
+   */
+  emailAllowlist?: readonly string[] | null;
 };
+
+/**
+ * REPORT_EMAIL_ALLOWLIST: comma/semicolon/newline separated addresses (spaces inside an entry make it invalid, never two entries). Unset or empty = no
+ * restriction. Fails CLOSED otherwise: a value with no valid address (a typo, a stray space)
+ * restricts to nobody instead of silently opening sending to everyone.
+ */
+export function parseEmailAllowlist(raw: string | undefined): string[] | null {
+  if (raw === undefined || raw === '') return null;
+  const valid = raw
+    .split(/[,;\n]+/)
+    .map(normalizeEmail)
+    .filter((address) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address));
+  return [...new Set(valid)];
+}
+
+export function recipientAllowed(
+  config: Pick<PipelineConfig, 'emailAllowlist'>,
+  email: string,
+): boolean {
+  return !config.emailAllowlist || config.emailAllowlist.includes(normalizeEmail(email));
+}
 
 export const DEFAULT_CONFIG: Omit<PipelineConfig, 'bookingUrl' | 'emailEnabled' | 'siteUrl'> = {
   maxAttempts: 5,
@@ -141,7 +168,10 @@ export async function createReport(
     report,
     email,
     fingerprint,
-    emailStatus: config.emailEnabled && deps.mailer ? 'pending' : 'disabled',
+    emailStatus:
+      config.emailEnabled && deps.mailer && recipientAllowed(config, email)
+        ? 'pending'
+        : 'disabled',
     sheetRowNumber,
     now: clock(deps),
   });
@@ -176,6 +206,11 @@ export async function deliverReportEmail(
   const { store, config, mailer } = deps;
   const project = options.syncTracking !== false;
   if (!config.emailEnabled || !mailer) return { outcome: 'not-claimed' };
+  if (config.emailAllowlist) {
+    // Checked BEFORE the claim so a refused address consumes no attempt and records nothing.
+    const target = await store.getById(reportId);
+    if (!target || !recipientAllowed(config, target.email)) return { outcome: 'not-claimed' };
+  }
   const claimed = await store.claimEmail(reportId, clock(deps), {
     maxAttempts: config.maxAttempts,
     leaseMs: config.leaseMs,

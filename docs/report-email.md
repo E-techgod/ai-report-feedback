@@ -62,9 +62,21 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 | `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_REPLY_TO`     | Resend; the sender domain must be verified (SPF + DKIM DNS records).                                    |
 | `RESEND_WEBHOOK_SECRET`                              | Resend webhook (`/api/webhooks/resend`; events: delivered, bounced, complained, delivery_delayed).      |
 | `REPORT_EMAIL_ENABLED`                               | `true` only after migration approval.                                                                   |
+| `REPORT_EMAIL_ALLOWLIST`                             | Optional test gate: when set, only these comma-separated addresses are ever emailed (see below).        |
 | `APP_URL`                                            | Public base URL (email logo).                                                                           |
 | `CRON_SECRET`                                        | Vercel Cron bearer secret. The recovery sweep runs once a day (see "Recovery schedule").                |
 | `GOOGLE_*`, `ANTHROPIC_*`, `NEXT_PUBLIC_BOOKING_URL` | Existing. Redeploy after changing the booking URL.                                                      |
+
+### Test gate: `REPORT_EMAIL_ALLOWLIST`
+
+For a controlled live test with `REPORT_EMAIL_ENABLED=true`: set this to the test inbox only. Reports for
+any other address are still generated and shown on the web, but are stored as `disabled` and never
+emailed (same as when the switch is off); a report created before the gate was set is refused at send
+time without consuming an attempt, and the cron sweep goes through the same check. Unset/empty means no
+restriction. A value with no valid address restricts to **nobody** (fail closed). Remove it, and
+redeploy, to return to normal operation. A permanent Resend failure is stored as
+`resend-http-<status>:<error name>` (for example `resend-http-403:validation_error`; never Resend's
+message, which can contain the address).
 
 ## Recovery schedule (Vercel Hobby: once a day)
 
