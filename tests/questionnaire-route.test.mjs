@@ -29,6 +29,7 @@ const headers = [
 function gateway() {
   const rows = [headers];
   let appends = 0;
+  const writes = [];
   return {
     rows,
     get appends() {
@@ -51,8 +52,11 @@ function gateway() {
       rows.push(row);
       return { updatedRows: 1, updatedCells: 24, updatedRange: '' };
     },
-    async writeCells() {
-      throw new Error('the questionnaire route must not write tracking cells');
+    writes,
+    async writeCells(rowNumber, cells) {
+      writes.push({ rowNumber, cells });
+      for (const cell of cells) rows[rowNumber - 1][cell.index] = String(cell.value);
+      return cells.length;
     },
   };
 }
@@ -69,8 +73,31 @@ const SECRET = 's'.repeat(32);
 function context(opts) {
   const h = reportDeps(opts);
   const sheet = gateway();
-  return { h, sheet, ctx: { deps: h.deps, secret: SECRET, gateway: sheet } };
+  const tasks = [];
+  const flush = async () => {
+    while (tasks.length) await tasks.shift()();
+  };
+  return {
+    h,
+    sheet,
+    tasks,
+    flush,
+    ctx: { deps: h.deps, secret: SECRET, gateway: sheet, schedule: (task) => tasks.push(task) },
+  };
 }
+
+const STATUS = 4; // "Estado Reporte"
+const OTHER_TRACKING = [5, 6, 7, 8, 9, 10, 11, 12, 14]; // email/download statuses, dates, error, attempts
+const silenced = async (fn) => {
+  const original = console.error;
+  const lines = [];
+  console.error = (...args) => lines.push(args.join(' '));
+  try {
+    return { result: await fn(), lines };
+  } finally {
+    console.error = original;
+  }
+};
 
 const pdfRequest = (report, token) =>
   new Request('https://example.com/api/report/pdf', {
@@ -221,4 +248,135 @@ test('retrying the same submission does not append another row and gets a fresh 
   assert.equal(sheet.appends, 1);
   assert.ok(retry.download.token);
   assert.equal(first.report.submissionId, retry.report.submissionId);
+});
+
+test('after a successful report only this row Estado Reporte becomes Generado', async () => {
+  const { sheet, tasks, flush, ctx } = context();
+  // An earlier, unrelated response row that must stay exactly as it is.
+  const earlier = Array(headers.length).fill('');
+  earlier[3] = 'otra@example.com';
+  earlier[STATUS] = 'Pendiente';
+  sheet.rows.push(earlier);
+  const snapshotEarlier = [...earlier];
+  const snapshotHeaders = [...headers];
+
+  const input = submission();
+  const body = await (await handleQuestionnaire(request(input), ctx)).json();
+  assert.equal(body.ok, true);
+  const row = sheet.rows[2];
+  assert.equal(row[STATUS], 'Pendiente', 'not written before the response is sent');
+  assert.equal(tasks.length, 1);
+
+  await flush();
+  assert.equal(row[STATUS], 'Generado');
+  assert.equal(sheet.writes.length, 1);
+  assert.equal(sheet.writes[0].rowNumber, 3);
+  assert.deepEqual(sheet.writes[0].cells, [{ index: STATUS, value: 'Generado' }]);
+  // Nothing else changed: answers, identity, marker, obsolete email/download fields stay empty.
+  for (const i of OTHER_TRACKING) assert.equal(row[i], '', `column ${i}`);
+  assert.equal(row[13], `submission:${input.id}`);
+  const answers = row.slice(15, 35);
+  questionIds.forEach((id, i) => assert.equal(answers[i], input.answers[id] ? 'Si' : 'No'));
+  assert.deepEqual(sheet.rows[1], snapshotEarlier);
+  assert.deepEqual(sheet.rows[0], snapshotHeaders);
+});
+
+test('a template-text report (AI unavailable) still counts as a generated report', async () => {
+  const { fallbackNarrative } = await import('../src/lib/report.ts');
+  const { sheet, flush, ctx } = context({
+    narrative: async (model) => ({
+      narrative: fallbackNarrative(model),
+      source: 'template',
+      failureReason: 'rate-limited',
+    }),
+  });
+  await handleQuestionnaire(request(submission()), ctx);
+  await flush();
+  assert.equal(sheet.rows[1][STATUS], 'Generado');
+});
+
+test('a failed Sheet status update never affects the response or the grant', async () => {
+  const { sheet, flush, ctx } = context();
+  sheet.writeCells = async () => {
+    throw new Error('quota exceeded');
+  };
+  const response = await handleQuestionnaire(request(submission()), ctx);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.ok(body.download.token);
+  const { lines } = await silenced(() => flush()); // the task itself must not throw
+  assert.ok(lines.some((line) => line.includes('could not set Estado Reporte')));
+  assert.equal(sheet.rows[1][STATUS], 'Pendiente');
+});
+
+test('a scheduler failure does not turn a good report into an error', async () => {
+  const { ctx } = context();
+  ctx.schedule = () => {
+    throw new Error('no request scope');
+  };
+  const { result } = await silenced(() => handleQuestionnaire(request(submission()), ctx));
+  const body = await result.json();
+  assert.equal(result.status, 200);
+  assert.ok(body.download.token);
+});
+
+test('if the row moved or changed, nothing is written', async () => {
+  const { sheet, flush, ctx } = context();
+  await handleQuestionnaire(request(submission()), ctx);
+  // Simulate a row insert/delete: the remembered row number now points at another person's row.
+  sheet.rows[1][3] = 'someone-else@example.com';
+  const { lines } = await silenced(() => flush());
+  assert.equal(sheet.writes.length, 0);
+  assert.ok(lines.some((line) => line.includes('no longer matches')));
+  assert.equal(sheet.rows[1][STATUS], 'Pendiente');
+});
+
+test('failed submissions leave Estado Reporte as Pendiente and schedule nothing', async () => {
+  const failedSheet = context();
+  failedSheet.sheet.appendRow = async () => {
+    throw new Error('quota exceeded');
+  };
+  await silenced(() => handleQuestionnaire(request(submission()), failedSheet.ctx));
+  assert.equal(failedSheet.tasks.length, 0);
+
+  const failedReport = context({
+    narrative: async () => {
+      throw new Error('boom');
+    },
+  });
+  await silenced(() => handleQuestionnaire(request(submission()), failedReport.ctx));
+  assert.equal(failedReport.tasks.length, 0);
+  assert.equal(failedReport.sheet.rows[1][STATUS], 'Pendiente');
+  assert.equal(failedReport.sheet.writes.length, 0);
+});
+
+test('a retry or refresh with the same submission writes the status only once', async () => {
+  const { sheet, flush, ctx } = context();
+  const input = submission();
+  await handleQuestionnaire(request(input), ctx);
+  await flush();
+  const retry = await (await handleQuestionnaire(request(input), ctx)).json();
+  await flush();
+  assert.equal(retry.duplicate, true);
+  assert.equal(sheet.appends, 1);
+  assert.equal(sheet.rows.length, 2);
+  assert.equal(sheet.rows[1][STATUS], 'Generado');
+  assert.equal(sheet.writes.length, 1, 'already Generado: no second write');
+});
+
+test('a page refresh (new submission id, same person and answers) reuses the row and issues a fresh window', async () => {
+  const { sheet, flush, ctx } = context();
+  const first = submission();
+  await handleQuestionnaire(request(first), ctx);
+  await flush();
+  const refreshed = await (
+    await handleQuestionnaire(request({ ...first, id: crypto.randomUUID() }), ctx)
+  ).json();
+  await flush();
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.duplicate, true);
+  assert.equal(refreshed.download.expiresInMs, 300_000);
+  assert.equal(sheet.rows.length, 2, 'no second row');
+  assert.equal(sheet.rows[1][STATUS], 'Generado');
+  assert.equal(sheet.writes.length, 1);
 });

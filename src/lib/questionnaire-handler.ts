@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { submissionSchema } from './validation';
-import { saveSubmissionWithRow, type SheetsGateway } from './sheets';
+import { markReportGenerated, saveSubmissionWithRow, type SheetsGateway } from './sheets';
 import { issueDownloadGrant } from './download-grant';
 import { generateReport, type ReportDeps } from './generate-report';
 import { NO_STORE } from './services';
@@ -12,7 +12,8 @@ const json = (body: unknown, status = 200) =>
 
 /**
  * 1) validates the submission (consent is mandatory), 2) appends a header-mapped Sheet row,
- * 3) generates the ONE finalized report (AI narrative + rules), 4) issues a 5-minute download grant.
+ * 3) generates the ONE finalized report (AI narrative + rules), 4) issues a 5-minute download grant
+ * and, after the response, marks the row's `Estado Reporte` as "Generado".
  * The Sheet is the only store: the report is returned to the browser and never persisted, and a
  * grant is issued only after BOTH the Sheet write and the report generation succeeded.
  */
@@ -22,10 +23,13 @@ export async function handleQuestionnaire(
     deps,
     secret,
     gateway,
+    schedule,
   }: {
     deps: ReportDeps;
     secret: string;
     gateway: SheetsGateway;
+    /** Runs after the response (Next's `after`), so a slow Sheet never delays the download. */
+    schedule: (task: () => Promise<void>) => void;
   },
 ) {
   const raw = await req.text();
@@ -44,9 +48,11 @@ export async function handleQuestionnaire(
 
   // Step 1: the response row. Once Google confirms it, the lead can no longer be lost.
   let duplicate = false;
+  let rowNumber = 0;
   try {
     const saved = await saveSubmissionWithRow(gateway, submission);
     duplicate = saved.status === 'duplicate';
+    rowNumber = saved.rowNumber;
   } catch (error) {
     // Log only a short message: Google client errors can embed request details.
     const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
@@ -62,6 +68,19 @@ export async function handleQuestionnaire(
   try {
     const report = await generateReport(deps, submission);
     const grant = issueDownloadGrant(report, secret, deps.now?.());
+    // Best effort and after the response: a failure here never affects the customer's download.
+    try {
+      schedule(async () => {
+        try {
+          await markReportGenerated(gateway, submission, rowNumber, 8_000);
+        } catch (error) {
+          const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
+          console.error('[questionnaire] could not set Estado Reporte:', message);
+        }
+      });
+    } catch {
+      console.error('[questionnaire] could not schedule the Estado Reporte update');
+    }
     return json({
       ok: true,
       duplicate,

@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { createGoogleSheetsGateway } from '@/lib/google-sheets-client';
 import { handleQuestionnaire } from '@/lib/questionnaire-handler';
 import { NO_STORE, getReportDeps, reportTokenSecret } from '@/lib/services';
@@ -18,5 +18,5 @@ export async function POST(req: Request) {
       { status: 503, headers: NO_STORE },
     );
   }
-  return handleQuestionnaire(req, { deps: getReportDeps(), secret, gateway });
+  return handleQuestionnaire(req, { deps: getReportDeps(), secret, gateway, schedule: after });
 }

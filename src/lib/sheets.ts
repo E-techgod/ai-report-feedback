@@ -256,6 +256,43 @@ export async function saveSubmissionWithRow(
   }
 }
 
+export const REPORT_GENERATED_LABEL = 'Generado';
+
+/**
+ * After the report exists, sets ONLY this row's `Estado Reporte` cell to "Generado". Nothing else
+ * is touched: other rows, answers, formatting and the email/download tracking cells stay as they are.
+ * The row number was learned moments ago, but rows can be inserted or removed in between, so the
+ * row is re-read and must still hold this person's email and all 20 answers; otherwise nothing is
+ * written. Returns whether a cell was written. Throws on Google/API failures (callers log and go on).
+ */
+export async function markReportGenerated(
+  gateway: SheetsGateway,
+  submission: Submission,
+  rowNumber: number,
+  timeoutMs?: number,
+): Promise<boolean> {
+  const schema = parseSheetSchema(await gateway.readHeaders(timeoutMs));
+  const statusColumn = schema.tracking.reportStatus;
+  if (statusColumn === undefined) throw new Error('Required report tracking headers are missing');
+  const row = (await gateway.readRows([rowNumber], schema.headers.length, timeoutMs))[0];
+  const matches =
+    row !== undefined &&
+    normalizeEmail(String(row[schema.email] ?? '')) === normalizeEmail(submission.email) &&
+    questionIds.every(
+      (id) =>
+        foldAnswer(row[schema.questions[id]]) ===
+        foldAnswer(normalizeAnswer(submission.answers[id])),
+    );
+  if (!matches) throw new Error('Spreadsheet row no longer matches this submission');
+  if (String(row[statusColumn] ?? '') === REPORT_GENERATED_LABEL) return false;
+  await gateway.writeCells(
+    rowNumber,
+    [{ index: statusColumn, value: REPORT_GENERATED_LABEL }],
+    timeoutMs,
+  );
+  return true;
+}
+
 /** Compatibility wrapper for callers that only need the dedupe outcome. */
 export async function saveSubmission(
   gateway: SheetsGateway,

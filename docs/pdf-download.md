@@ -32,8 +32,15 @@ POST /api/report/pdf       header x-download-token, body = the report JSON
 
 ## Sheet columns
 
-The app still appends the row exactly as before (including `Estado Reporte = Pendiente` and the
-`submission:<uuid>` marker in `ID Reporte`, which makes retries idempotent). It no longer updates
-the tracking columns afterwards (`Estado Email`, `Estado Descarga PDF`, `Fecha *`, `Intentos Email`,
-...): there is nothing to project. The columns are left in place for the existing Dashboard/Apps
-Script. The legacy Apps Script files in `scripts/` are untouched.
+The row is appended exactly as before (`Estado Reporte = Pendiente` and the `submission:<uuid>` marker
+in `ID Reporte`, which makes retries idempotent). After the report is generated the app sets that
+one row's `Estado Reporte` cell to `Generado`, after the response is sent:
+
+- it re-reads the row and writes only if the email and all 20 answers still match (rows can move);
+- it writes a single cell, never other rows, answers or formatting;
+- a failure is logged and ignored: the customer's download is unaffected and the cell stays
+  `Pendiente`;
+- a report with template text (AI unavailable) also counts as `Generado`; failed submissions never do.
+
+Every other tracking column (`Estado Email`, `Estado Descarga PDF`, `Fecha *`, `Intentos Email`, ...)
+stays empty: there is nothing to project. The legacy Apps Script files in `scripts/` are untouched.
