@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <meta name="description" content="Prototipo V2 del reporte de Diagnóstico Patrimonial Quirón, con separación entre motor de reglas, interfaz fija y espacios reservados para IA." />
+  <title>QUIRÓN · Diagnóstico Patrimonial · Prototipo V2</title>
+  <style>
+    :root {
+      --bg:#f4f3ee; --paper:#fff; --ink:#162a20; --muted:#63756a;
+      --soft:#f8faf7; --line:#e1e8df; --forest:#143b2c; --green:#1b6246;
+      --det:#1767a7; --det-bg:#eaf4ff; --det-line:#c6def8;
+      --ai:#7845ac; --ai-bg:#f6efff; --ai-line:#dfccf6;
+      --static:#66776b; --static-bg:#eff3ef;
+      --amber:#9a6626; --amber-bg:#fbf0df;
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    button,a{ -webkit-tap-highlight-color:transparent }
+    button{font:inherit;cursor:pointer}
+    button:focus-visible,a:focus-visible{outline:3px solid #77aef2;outline-offset:3px}
+    .topbar{background:#102b21;color:#fff;padding:13px max(22px,calc((100vw - 1320px)/2));display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}
+    .brand{display:flex;align-items:center;gap:12px}
+    .brand-mark{height:43px;width:43px;border:1px solid #749b86;border-radius:12px;display:grid;place-items:center;font:normal 30px Georgia,serif;color:#f9fff9}
+    .brand-label{display:grid;gap:0}.brand-label strong{font-size:13px;font-weight:750;letter-spacing:.21em}.brand-label small{font-size:11px;letter-spacing:.04em;color:#b8d0c1}
+    .top-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .top-pill{border-radius:999px;background:#2c5441;color:#d9f5e3;font-size:10px;font-weight:800;letter-spacing:.11em;padding:6px 11px;margin-right:4px}
+    .control{border:1px solid #607f70;color:#fff;background:transparent;border-radius:8px;padding:9px 12px;font-size:12px;font-weight:600;white-space:nowrap}
+    .control:hover{background:#285540}.control.on{background:#e7f5eb;border-color:#e7f5eb;color:#17402e}
+    .reviewbar{max-width:1280px;margin:23px auto 0;padding:0 16px}
+    .reviewbar-inner{border:1px solid #d5e2d8;background:#eaf3eb;padding:14px 18px;border-radius:12px;display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    .reviewbar strong{font-size:13px}.reviewbar p{font-size:12px;color:#576c5e;margin:2px 0 0}.small-kpis{display:flex;gap:8px;flex-wrap:wrap}
+    .mini-pill{display:inline-flex;align-items:center;gap:7px;border:1px solid;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700;background:#fff}
+    .mini-pill.det{border-color:var(--det-line);color:var(--det)}.mini-pill.ai{border-color:var(--ai-line);color:var(--ai)}.mini-pill.static{border-color:#cdd6cd;color:#637568}
+    .workspace{display:grid;grid-template-columns:205px minmax(0,1fr) 244px;align-items:start;gap:22px;max-width:1320px;margin:21px auto 48px;padding:0 16px}
+    aside{position:sticky;top:20px;align-self:start}
+    .side-heading,.eyebrow{font-size:10px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:#77877d}
+    .side-heading{margin:5px 0 10px 10px}
+    .nav a{display:flex;gap:9px;align-items:center;padding:10px 12px;margin-bottom:3px;text-decoration:none;color:#55685b;font-size:12px;font-weight:600;border-radius:9px}
+    .nav a span{font-size:11px;color:#8b9a90;font-weight:650;min-width:19px}
+    .nav a:hover,.nav a.active{background:#e3ede5;color:#164e38}
+    .side-card{border:1px solid #e0e6dd;background:#fff;border-radius:13px;padding:17px;margin-top:19px}
+    .side-card h3{font-size:13px;margin:0 0 7px}.side-card p{font-size:12px;color:#64776b;margin:5px 0 0}
+    .legend-row{display:flex;align-items:center;gap:8px;font-size:11px;color:#586a5e;margin-top:10px}.dot{width:9px;height:9px;border-radius:50%;flex:none}
+    .dot.det{background:var(--det)}.dot.ai{background:var(--ai)}.dot.static{background:#839187}
+    .mix-bar{display:flex;width:100%;height:12px;overflow:hidden;border-radius:8px;margin:15px 0 14px;gap:2px;background:#fff}
+    .mix-bar .bar-det{width:65%;background:var(--det)}.mix-bar .bar-static{width:20%;background:#809286}.mix-bar .bar-ai{width:15%;background:var(--ai)}
+    .mix-row{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px;margin:9px 0}.mix-row b{font-size:16px}.mix-row .det-label{color:var(--det)}.mix-row .static-label{color:#728479}.mix-row .ai-label{color:var(--ai)}
+    .footnote{font-size:10px!important;line-height:1.55;color:#809086!important;margin-top:14px!important}
+    .paper{min-width:0;background:var(--paper);border:1px solid #e3e9df;border-radius:17px;overflow:hidden;box-shadow:0 22px 65px rgba(29,51,34,.075)}
+    .demo-notice{background:#fff8ed;border-bottom:1px solid #f2e5cf;color:#855a20;padding:11px 40px;font-size:11px;font-weight:650}
+    .hero{background:linear-gradient(135deg,#fbfcf8 0%,#eff5f0 100%);padding:41px 40px 37px;border-bottom:1px solid var(--line)}
+    .hero .eyebrow{color:#2d7450}
+    h1,h2,h3,p{margin-top:0}
+    h1{font:normal clamp(31px,3.2vw,45px)/1.15 Georgia,"Times New Roman",serif;letter-spacing:-.025em;margin:16px 0 15px;max-width:570px}
+    h2{font:normal 28px/1.2 Georgia,serif;letter-spacing:-.02em;margin:0 0 9px}
+    h3{font-size:15px;line-height:1.4;margin:0 0 7px}
+    p{color:#4c5e52}
+    .lead{font-size:14px;max-width:640px;margin-bottom:0}
+    .meta{display:flex;gap:9px 16px;flex-wrap:wrap;color:#768579;font-size:11px;margin-top:23px}
+    .meta span+span::before{content:'·';margin-right:15px}
+    .scores{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-top:27px}
+    .score-card{padding:20px 21px;background:#fff;border:1px solid #dce7dd;border-radius:12px;min-width:0}
+    .score-label{font-size:11px;color:#647568;font-weight:650}
+    .score-number{font:normal 42px/1.13 Georgia,serif;color:#1a4633;margin:7px 0 4px}
+    .score-sub{font-size:11px;color:#687b6c}.level{display:inline-flex;font-size:10px;font-weight:800;color:var(--amber);background:var(--amber-bg);border-radius:999px;padding:4px 9px}
+    .progress{height:7px;border-radius:10px;background:#e8eee8;margin:14px 0 8px;overflow:hidden}.progress-fill{background:#b68d49;width:55%;height:100%;border-radius:10px}
+    .section{padding:35px 40px;border-bottom:1px solid var(--line);scroll-margin-top:16px}.section:last-child{border:0}
+    .sec-header{display:flex;align-items:flex-start;gap:14px;margin-bottom:20px}.sec-number{font:normal 24px/1.1 Georgia,serif;color:#97aa9a;min-width:30px}.sec-sub{font-size:12px;color:#718176;margin:0;max-width:550px}
+    .source-line{display:flex;gap:7px 9px;align-items:center;flex-wrap:wrap;margin-top:11px}
+    .source-tag{display:inline-flex;align-items:center;gap:5px;border-radius:999px;border:1px solid;font-size:10px;font-weight:800;letter-spacing:.02em;padding:3px 8px;white-space:nowrap}
+    .source-tag.det{background:var(--det-bg);border-color:var(--det-line);color:var(--det)}
+    .source-tag.ai{background:var(--ai-bg);border-color:var(--ai-line);color:var(--ai)}
+    .source-tag.static{background:var(--static-bg);border-color:#d6e1d7;color:var(--static)}
+    .source-note{font-size:10px;color:#79867b;line-height:1.45}
+    .content-panel{border:1px solid #e2e9e1;background:#fafcf9;border-radius:12px;padding:19px 20px;margin-top:12px}
+    .content-panel p:last-child{margin-bottom:0}.content-panel h3{font-size:13px}
+    .signal-list{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+    .signal{background:#fff;border:1px solid #e1e8e0;border-radius:10px;padding:14px;min-height:108px}
+    .signal-label{font-size:11px;color:#78877b;margin-bottom:7px}.signal strong{font-size:12px;line-height:1.35;display:block}.signal small{display:block;font-size:10px;color:#718276;margin-top:6px}
+    .ai-box{border:1px dashed #bd9adc;background:#faf6ff;border-radius:12px;padding:17px 19px;margin-top:15px}
+    .ai-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+    .ai-head strong{font-size:12px;color:#61338b}.ai-limit{font-size:10px;color:#835ca6;background:#eee1fc;padding:3px 8px;border-radius:999px;white-space:nowrap}
+    .ai-content{margin-top:10px;font-size:13px;line-height:1.7;color:#684c79}
+    .ai-content.placeholder{font-style:italic}.ai-content.example{color:#4f3d5d;font-style:normal}
+    .ai-meta{margin:9px 0 0;font-size:10px;color:#806d90}
+    .areas{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .area{border:1px solid #e0e7df;padding:17px;border-radius:11px;min-width:0;background:#fff}
+    .area-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.area h3{font-size:13px;margin-bottom:7px}
+    .area p{font-size:12px;margin:3px 0 0}.chip{display:inline-block;border-radius:99px;padding:3px 8px;font-size:10px;font-weight:750;white-space:nowrap;background:var(--amber-bg);color:var(--amber)}
+    .chip.neutral{background:#eff3ef;color:#617568}.chip.green{background:#e7f3e9;color:#276a46}
+    .conditional{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap}
+    .priority{display:grid;grid-template-columns:34px minmax(0,1fr);gap:13px;padding:19px 0;border-bottom:1px solid #e4e9e2}.priority:last-child{border:0}
+    .rank{font:normal 30px/1 Georgia,serif;color:#a2b3a5}.priority h3{font-size:14px;margin:0 0 8px}
+    .priority-line{font-size:12px;line-height:1.6;color:#53675a;margin:6px 0}
+    .priority-line b{color:#203d2c}
+    .priority .ai-box{margin-top:13px;padding:13px 15px}
+    .timeline{border-left:2px solid #dce8dd;padding-left:24px;margin:9px 0 0 10px}
+    .step{position:relative;padding:0 0 20px}.step:last-child{padding-bottom:0}
+    .step:before{content:'';position:absolute;top:4px;left:-31px;width:10px;height:10px;background:#28734d;border:3px solid #eef5ef;border-radius:50%}
+    .step small{color:#788a7c;font-size:11px;display:block;margin-bottom:6px}.step h3{margin-bottom:5px}.step p{font-size:12px;margin-bottom:0}
+    .cta{border-radius:12px;padding:26px;margin-top:24px;background:#153c2b;color:#fff}
+    .cta h3{font:normal 25px/1.2 Georgia,serif}.cta p{color:#cce0d0;font-size:12px}
+    .cta button{padding:10px 16px;background:#eff7ef;border:0;border-radius:8px;color:#16482f;font-size:12px;font-weight:800}
+    .cta button:hover{background:#d5ecd9}
+    .legal{font-size:10px;color:#829285;line-height:1.6;margin-top:19px}
+    .right-note{padding-left:17px;margin:8px 0}.right-note li{font-size:11px;color:#64776b;margin-bottom:8px}
+    .note-divider{border:0;border-top:1px solid #e1e8df;margin:17px 0}
+    .site-footer{text-align:center;color:#8b988d;padding:0 20px 32px;font-size:10px}
+    .client-mode .technical-only{display:none!important}
+    .client-mode .ai-box{background:#fafbf9;border:1px solid #e1e8df}
+    .client-mode .ai-head,.client-mode .ai-meta{display:none}
+    .client-mode .ai-content{color:#4d5e51;margin-top:0}
+    .client-mode .ai-content.example{font-style:normal}
+    @media(max-width:1160px){.workspace{grid-template-columns:190px minmax(0,1fr)}.right-side{display:none}.hero,.section{padding-left:31px;padding-right:31px}.demo-notice{padding-left:31px;padding-right:31px}}
+    @media(max-width:740px){.topbar{padding:12px 15px}.brand-mark{width:37px;height:37px;font-size:27px}.brand-label strong{font-size:11px}.brand-label small{display:none}.top-actions{width:100%}.top-pill{margin-right:auto}.control{padding:8px 10px;font-size:11px}.reviewbar{margin-top:13px}.reviewbar-inner{padding:12px}.workspace{display:block;margin:13px auto 30px;padding:0 11px}.left-side{position:static;margin-bottom:11px}.side-heading,.left-side .side-card{display:none}.nav{display:flex;gap:4px;overflow-x:auto;padding-bottom:3px}.nav a{white-space:nowrap;flex:none;background:#fff;border:1px solid #e3e9e2;padding:8px 10px}.paper{border-radius:12px}.hero,.section{padding:26px 20px}.demo-notice{padding:10px 20px}.scores,.areas,.signal-list{grid-template-columns:1fr}.score-number{font-size:37px}h1{font-size:33px}h2{font-size:25px}}
+    @media print{ @page{size:A4;margin:13mm} body{background:white}.topbar,.reviewbar,.left-side,.right-side,.site-footer,.technical-only{display:none!important}.workspace{display:block;padding:0;margin:0}.paper{border:0;box-shadow:none;border-radius:0}.hero{background:#f5f8f4!important}.hero,.section{padding:20px 17px}.section{break-inside:avoid}.area,.priority,.ai-box,.content-panel,.score-card{break-inside:avoid}.ai-head,.ai-meta{display:none!important}.ai-box{background:#fafbf9!important;border:1px solid #e2e8e0!important}.ai-content{font-style:normal!important;color:#4d5e51!important}.cta{background:#153c2b!important;color:#fff!important}.demo-notice{display:none}*{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
+  </style>
+</head>
+<body class="review-mode placeholders-mode">
+<header class="topbar">
+  <div class="brand"><div class="brand-mark" aria-hidden="true">Q</div><div class="brand-label"><strong>QUIRÓN</strong><small>Protección patrimonial</small></div></div>
+  <div class="top-actions">
+    <span class="top-pill">PROTOTIPO V2</span>
+    <button type="button" class="control on" id="viewToggle" aria-pressed="true">● Vista del equipo</button>
+    <button type="button" class="control on technical-only" id="aiToggle" aria-pressed="true">◈ Espacios de IA</button>
+    <button type="button" class="control" id="printButton">Imprimir / PDF ↗</button>
+  </div>
+</header>
+<div class="reviewbar technical-only">
+  <div class="reviewbar-inner">
+    <div><strong>Mapa de responsabilidad · Propuesta V2</strong><p>La IA solo interviene en el resumen ejecutivo y en breves explicaciones de las tres prioridades.</p></div>
+    <div class="small-kpis">
+      <span class="mini-pill det">65% · Reglas</span><span class="mini-pill static">20% · Interfaz</span><span class="mini-pill ai">15% · IA</span>
+    </div>
+  </div>
+</div>
+<div class="workspace">
+  <aside class="left-side">
+    <div class="side-heading">Contenido del reporte</div>
+    <nav class="nav" aria-label="Secciones del reporte">
+      <a href="#resumen" class="active"><span>00</span>Resumen</a>
+      <a href="#ejecutivo"><span>01</span>Diagnóstico</a>
+      <a href="#personal"><span>02</span>Personal</a>
+      <a href="#empresarial"><span>03</span>Empresarial</a>
+      <a href="#prioridades"><span>04</span>Prioridades</a>
+      <a href="#plan"><span>05</span>Plan de acción</a>
+    </nav>
+    <div class="side-card technical-only">
+      <h3>Cómo leer este prototipo</h3>
+      <div class="legend-row"><i class="dot det"></i> Azul · Motor determinístico</div>
+      <div class="legend-row"><i class="dot ai"></i> Morado · Espacio para Claude</div>
+      <div class="legend-row"><i class="dot static"></i> Gris · Interfaz fija</div>
+      <p>Usa “Vista del equipo” para cambiar a una vista limpia de cliente. Puedes alternar los espacios reservados por ejemplos de redacción.</p>
+    </div>
+  </aside>
+  <main class="paper" id="report">
+    <div class="demo-notice technical-only">DATOS ILUSTRATIVOS · Esta es una maqueta de revisión. No contiene respuestas reales ni ejecuta reglas o llamadas a IA.</div>
+    <section class="hero" id="resumen">
+      <div class="eyebrow">Tu evaluación · Diagnóstico inicial</div>
+      <h1>Tu diagnóstico patrimonial personalizado.</h1>
+      <p class="lead">Una mirada integral a la protección de tu patrimonio, tu familia y la continuidad de lo que has construido.</p>
+      <div class="source-line technical-only"><span class="source-tag static">INTERFAZ FIJA</span><span class="source-note">Encabezado, contenido de marca y estructura del reporte.</span></div>
+      <div class="meta"><span>Evaluación ilustrativa</span><span>Reporte de muestra</span><span>QUIRÓN · 2026</span></div>
+      <div class="scores">
+        <article class="score-card"><div class="score-label">Blindaje patrimonial general</div><div class="score-number">55%</div><span class="level">Protección baja</span><div class="progress" aria-label="55 por ciento"><div class="progress-fill"></div></div><div class="source-line technical-only"><span class="source-tag det">REGLAS · SCORE</span><span class="source-note">Resultado y nivel calculados; valores de demostración.</span></div></article>
+        <article class="score-card"><div class="score-label">Áreas por fortalecer</div><div class="score-number">9 <span style="font-size:23px;color:#96a398">/ 20</span></div><div class="score-sub">Indicadores detectados según las respuestas</div><div class="source-line technical-only"><span class="source-tag det">REGLAS · CONTEO</span><span class="source-note">Número de indicadores; denominador provisional.</span></div></article>
+      </div>
+    </section>
+    <section class="section" id="ejecutivo">
+      <div class="sec-header"><span class="sec-number">01</span><div><h2>Diagnóstico ejecutivo</h2><p class="sec-sub">Una lectura clara de tus principales indicadores patrimoniales.</p></div></div>
+      <div class="content-panel">
+        <h3>Lo que detectamos en tu evaluación</h3>
+        <div class="signal-list">
+          <div class="signal"><div class="signal-label">Nivel general</div><strong>Protección baja</strong><small>Clasificación del motor</small></div>
+          <div class="signal"><div class="signal-label">Indicadores</div><strong>9 áreas por fortalecer</strong><small>Conteo del motor</small></div>
+          <div class="signal"><div class="signal-label">Foco principal</div><strong>Planeación sucesoria</strong><small>Prioridad ilustrativa</small></div>
+        </div>
+        <div class="source-line technical-only"><span class="source-tag det">REGLAS · RESULTADOS</span><span class="source-note">Los datos y hallazgos proceden del motor, nunca de Claude.</span></div>
+      </div>
+      <!-- AI SLOT 1: executive summary. No computations or fresh facts may be generated here. -->
+      <div class="ai-box" data-ai-slot="executive-summary" data-max-words="90">
+        <div class="ai-head"><strong>✧ Espacio reservado · Interpretación ejecutiva</strong><span class="ai-limit">IA · Hasta 90 palabras</span></div>
+        <div class="ai-content placeholder">[CLAUDE HAIKU — REDACTAR AQUÍ] Un párrafo breve que explique los hallazgos ya calculados por el motor de reglas. Sin agregar cifras, diagnósticos, riesgos ni prioridades nuevos.</div>
+        <div class="ai-content example" hidden>El resultado preliminar muestra áreas de protección que conviene atender de forma ordenada. La planeación sucesoria destaca entre los puntos a revisar, junto con la protección familiar y la organización documental. Estos indicadores no equivalen a una valoración definitiva: sirven como punto de partida para contrastar tu situación con documentación vigente y definir acciones concretas con un especialista.</div>
+        <div class="ai-meta technical-only">Entrada permitida: score, nivel, indicadores y prioridades verificadas. <b>La IA solo redacta.</b> El texto de ejemplo es simulado.</div>
+      </div>
+    </section>
+    <section class="section" id="personal">
+      <div class="sec-header"><span class="sec-number">02</span><div><h2>Patrimonio personal</h2><p class="sec-sub">Planeación sucesoria, documentación, protección familiar y seguros.</p></div></div>
+      <div class="areas">
+        <article class="area"><div class="area-top"><h3>Planeación sucesoria</h3><span class="chip">Por revisar</span></div><p>Verificar que existan decisiones y documentos sucesorios pertinentes y actualizados.</p><div class="source-line technical-only"><span class="source-tag det">REGLAS</span><span class="source-note">Indicador y texto aprobado.</span></div></article>
+        <article class="area"><div class="area-top"><h3>Documentación patrimonial</h3><span class="chip neutral">Evaluar</span></div><p>Organización, vigencia y accesibilidad de documentos esenciales.</p><div class="source-line technical-only"><span class="source-tag det">REGLAS</span><span class="source-note">Indicador y texto aprobado.</span></div></article>
+        <article class="area"><div class="area-top"><h3>Protección familiar</h3><span class="chip">Por revisar</span></div><p>Identificación de dependientes, contingencias y mecanismos de respaldo existentes.</p><div class="source-line technical-only"><span class="source-tag det">REGLAS</span><span class="source-note">Estado condicionado a respuestas.</span></div></article>
+        <article class="area"><div class="area-top"><h3>Seguros y coberturas</h3><span class="chip neutral">Evaluar</span></div><p>Revisión inicial de las coberturas declaradas y su pertinencia.</p><div class="source-line technical-only"><span class="source-tag det">REGLAS</span><span class="source-note">Sin texto generado por IA.</span></div></article>
+      </div>
+      <div class="source-line technical-only"><span class="source-tag det">SECCIÓN 100% REGLAS</span><span class="source-note">Hallazgos, estados y explicaciones proceden de reglas y plantillas validadas.</span></div>
+    </section>
+    <section class="section" id="empresarial">
+      <div class="sec-header"><span class="sec-number">03</span><div><h2>Patrimonio empresarial</h2><p class="sec-sub">Protección de la empresa, sucesión y continuidad de operaciones.</p></div></div>
+      <div class="content-panel">
+        <div class="conditional"><h3 style="margin:0">Aplicabilidad de esta evaluación</h3><span class="chip neutral">Condicional</span></div>
+        <p style="font-size:12px;margin:9px 0 0">El motor determina si este apartado corresponde al perfil del usuario. Aquí aparece solo para demostrar el diseño; en un reporte real podría marcarse como no aplicable.</p>
+        <div class="source-line technical-only"><span class="source-tag det">REGLAS · CONDICIÓN</span><span class="source-note">Visible, no aplicable u omitido según el cuestionario.</span></div>
+      </div>
+      <div class="areas" style="margin-top:12px">
+        <article class="area"><div class="area-top"><h3>Sucesión empresarial</h3><span class="chip neutral">Evaluar</span></div><p>Existencia de criterios para transferir liderazgo o propiedad.</p></article>
+        <article class="area"><div class="area-top"><h3>Gobierno y continuidad</h3><span class="chip neutral">Evaluar</span></div><p>Protocolos, responsabilidades y preparación ante interrupciones.</p></article>
+      </div>
+      <div class="source-line technical-only"><span class="source-tag det">SECCIÓN 100% REGLAS</span><span class="source-note">No existe bloque de generación IA en patrimonio empresarial.</span></div>
+    </section>
+    <section class="section" id="prioridades">
+      <div class="sec-header"><span class="sec-number">04</span><div><h2>Tres prioridades estratégicas</h2><p class="sec-sub">Tres puntos de atención seleccionados y ordenados con reglas predefinidas.</p></div></div>
+      <div class="source-line technical-only" style="margin-bottom:6px"><span class="source-tag det">REGLAS · RANKING</span><span class="source-note">Claude no selecciona ni reordena ninguna prioridad.</span></div>
+      <article class="priority"><div class="rank">1</div><div><h3>Revisar la planeación sucesoria</h3><p class="priority-line"><b>Hallazgo:</b> Documentación y decisiones sucesorias por validar.</p><p class="priority-line"><b>Acción recomendada:</b> Reunir documentos existentes y revisarlos con un especialista.</p><div class="source-line technical-only"><span class="source-tag det">REGLAS · HALLAZGO + ACCIÓN</span></div>
+        <div class="ai-box" data-ai-slot="priority-1" data-max-words="25"><div class="ai-head"><strong>✧ Contexto breve para esta prioridad</strong><span class="ai-limit">IA · 25 palabras máx.</span></div><div class="ai-content placeholder">[CLAUDE] Explicar brevemente por qué este hallazgo merece atención, sin modificar la acción indicada.</div><div class="ai-content example" hidden>Clarificar la planeación sucesoria puede facilitar la toma de decisiones familiares y reducir incertidumbres cuando se requiere actuar.</div><div class="ai-meta technical-only">Solo explicación contextual; texto de ejemplo simulado.</div></div>
+      </div></article>
+      <article class="priority"><div class="rank">2</div><div><h3>Evaluar la protección familiar</h3><p class="priority-line"><b>Hallazgo:</b> Posibles necesidades de protección por validar.</p><p class="priority-line"><b>Acción recomendada:</b> Revisar coberturas vigentes y necesidades declaradas.</p><div class="source-line technical-only"><span class="source-tag det">REGLAS · HALLAZGO + ACCIÓN</span></div>
+        <div class="ai-box" data-ai-slot="priority-2" data-max-words="25"><div class="ai-head"><strong>✧ Contexto breve para esta prioridad</strong><span class="ai-limit">IA · 25 palabras máx.</span></div><div class="ai-content placeholder">[CLAUDE] Explicar el sentido de revisar los mecanismos de respaldo familiar, sin inventar brechas de cobertura.</div><div class="ai-content example" hidden>Contrastar las protecciones existentes con las responsabilidades familiares ayuda a identificar los temas que conviene revisar antes de tomar decisiones.</div><div class="ai-meta technical-only">Solo explicación contextual; texto de ejemplo simulado.</div></div>
+      </div></article>
+      <article class="priority"><div class="rank">3</div><div><h3>Organizar la documentación esencial</h3><p class="priority-line"><b>Hallazgo:</b> Organización de información patrimonial por evaluar.</p><p class="priority-line"><b>Acción recomendada:</b> Preparar un inventario de documentos y responsables.</p><div class="source-line technical-only"><span class="source-tag det">REGLAS · HALLAZGO + ACCIÓN</span></div>
+        <div class="ai-box" data-ai-slot="priority-3" data-max-words="25"><div class="ai-head"><strong>✧ Contexto breve para esta prioridad</strong><span class="ai-limit">IA · 25 palabras máx.</span></div><div class="ai-content placeholder">[CLAUDE] Explicar el valor de mantener información organizada y accesible, sin introducir recomendaciones adicionales.</div><div class="ai-content example" hidden>La documentación accesible permite consultar información relevante y dar seguimiento a las decisiones patrimoniales con mayor orden.</div><div class="ai-meta technical-only">Solo explicación contextual; texto de ejemplo simulado.</div></div>
+      </div></article>
+    </section>
+    <section class="section" id="plan">
+      <div class="sec-header"><span class="sec-number">05</span><div><h2>Tu plan de acción</h2><p class="sec-sub">Pasos iniciales elegidos de un catálogo de acciones aprobadas.</p></div></div>
+      <div class="timeline">
+        <div class="step"><small>Etapa 1 · Inicio</small><h3>Reunir documentación esencial</h3><p>Consolidar la información necesaria para validar los hallazgos prioritarios.</p></div>
+        <div class="step"><small>Etapa 2 · Seguimiento</small><h3>Revisar prioridades con un asesor</h3><p>Contrastar la evaluación con el contexto patrimonial y los documentos disponibles.</p></div>
+        <div class="step"><small>Etapa 3 · Revisión periódica</small><h3>Actualizar la estrategia</h3><p>Volver a evaluar la protección ante cambios personales o empresariales relevantes.</p></div>
+      </div>
+      <div class="source-line technical-only"><span class="source-tag det">REGLAS · ACCIONES + ORDEN</span><span class="source-note">Sin generación de IA; textos recuperados de un catálogo autorizado.</span></div>
+      <div class="cta"><h3>Da el siguiente paso para proteger tu patrimonio.</h3><p>Un asesor de Quirón puede ayudarte a validar los hallazgos y convertir este diagnóstico inicial en un plan personalizado.</p><button type="button" id="demoBooking">Agendar una asesoría ↗</button><div class="source-line technical-only"><span class="source-tag static">CTA FIJO</span><span class="source-note" style="color:#bcd5c5">El enlace real se conectará cuando se apruebe el diseño.</span></div></div>
+      <p class="legal">Este reporte es una herramienta informativa preliminar. No sustituye asesoría legal, fiscal, financiera ni de seguros personalizada.</p>
+      <div class="source-line technical-only"><span class="source-tag static">INTERFAZ FIJA</span><span class="source-note">Disclaimer, branding, navegación y CTA.</span></div>
+    </section>
+  </main>
+  <aside class="right-side technical-only">
+    <div class="side-card" style="margin-top:0">
+      <h3>Distribución propuesta · V2</h3><p>Participación conceptual del contenido del reporte.</p>
+      <div class="mix-bar" role="img" aria-label="65% reglas, 20% interfaz fija, 15% IA"><span class="bar-det"></span><span class="bar-static"></span><span class="bar-ai"></span></div>
+      <div class="mix-row"><span class="det-label">Motor de reglas</span><b class="det-label">65%</b></div>
+      <div class="mix-row"><span class="static-label">Interfaz fija</span><b class="static-label">20%</b></div>
+      <div class="mix-row"><span class="ai-label">Texto de IA</span><b class="ai-label">15%</b></div>
+      <p class="footnote">Meta de diseño aproximada, no una medición exacta de palabras ni esfuerzo de desarrollo.</p>
+      <hr class="note-divider" />
+      <h3>Claude solo llena 4 espacios</h3>
+      <ol class="right-note"><li>Un resumen ejecutivo (hasta 90 palabras).</li><li>Contexto de prioridad 1 (hasta 25 palabras).</li><li>Contexto de prioridad 2 (hasta 25 palabras).</li><li>Contexto de prioridad 3 (hasta 25 palabras).</li></ol>
+      <p class="footnote">Cuatro campos de texto en una sola respuesta estructurada. La IA no calcula scores, no selecciona riesgos y no decide acciones.</p>
+      <hr class="note-divider" />
+      <h3>Decisiones pendientes</h3>
+      <ol class="right-note"><li>Fórmula y umbrales definitivos.</li><li>Reglas de no aplicabilidad.</li><li>Catálogo de acciones y ranking.</li><li>Revisión editorial de las plantillas.</li><li>Validación de diseño por el equipo.</li></ol>
+    </div>
+  </aside>
+</div>
+<footer class="site-footer technical-only">QUIRÓN · REPORTE PATRIMONIAL · PROTOTIPO V2 · Sin datos reales · Sin conexión a IA</footer>
+<script>
+  // Interactive review controls. This is a standalone HTML prototype: no backend, no API calls.
+  const viewToggle = document.getElementById('viewToggle');
+  const aiToggle = document.getElementById('aiToggle');
+  const printButton = document.getElementById('printButton');
+  let teamView = true;
+  let showPlaceholders = true;
+  function renderMode(){
+    document.body.classList.toggle('client-mode', !teamView);
+    document.body.classList.toggle('review-mode', teamView);
+    viewToggle.classList.toggle('on', teamView);
+    viewToggle.setAttribute('aria-pressed', String(teamView));
+    viewToggle.textContent = teamView ? '● Vista del equipo' : '○ Vista del cliente';
+    aiToggle.classList.toggle('on', showPlaceholders);
+    aiToggle.setAttribute('aria-pressed', String(showPlaceholders));
+    aiToggle.textContent = showPlaceholders ? '◈ Espacios de IA' : '✧ Ejemplos de texto IA';
+    const showExamples = !teamView || !showPlaceholders;
+    document.querySelectorAll('.ai-content.placeholder').forEach(el => el.hidden = showExamples);
+    document.querySelectorAll('.ai-content.example').forEach(el => el.hidden = !showExamples);
+  }
+  viewToggle.addEventListener('click', () => {teamView = !teamView;renderMode()});
+  aiToggle.addEventListener('click', () => {showPlaceholders = !showPlaceholders;renderMode()});
+  document.getElementById('demoBooking').addEventListener('click', () => alert('Prototipo V2: aquí se abrirá el enlace oficial para agendar una asesoría con Quirón.'));
+  let printWasTeam = true;
+  let printWasPlaceholders = true;
+  printButton.addEventListener('click', () => {printWasTeam = teamView;printWasPlaceholders = showPlaceholders;teamView = false;showPlaceholders = false;renderMode();window.print();});
+  window.addEventListener('afterprint', () => {teamView = printWasTeam;showPlaceholders = printWasPlaceholders;renderMode()});
+  const links = Array.from(document.querySelectorAll('.nav a'));
+  if ('IntersectionObserver' in window) {
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {if(entry.isIntersecting) links.forEach(a => a.classList.toggle('active', a.getAttribute('href')==='#'+entry.target.id));});
+    }, {rootMargin:'-16% 0px -70% 0px'});
+    document.querySelectorAll('main section[id]').forEach(s => observer.observe(s));
+  }
+  renderMode();
+</script>
+</body>
+</html>
