@@ -1,8 +1,8 @@
 'use client';
 import Image from 'next/image';
 import Link from 'next/link';
-import ReportView, { type EmailStatusView } from '@/components/ReportView';
-import { useEffect, useRef, useState } from 'react';
+import ReportView, { type PdfDownload } from '@/components/ReportView';
+import { useRef, useState } from 'react';
 import type { FinalReport } from '@/lib/final-report';
 import { questions } from '@/lib/questions';
 import { type Answers } from '@/lib/scoring';
@@ -17,8 +17,8 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [report, setReport] = useState<FinalReport | null>(null);
-  const [access, setAccess] = useState<{ id: string; token: string } | null>(null);
-  const [emailStatus, setEmailStatus] = useState<EmailStatusView | null>(null);
+  // Held in memory only (never localStorage): lost on reload, which ends the download session.
+  const [download, setDownload] = useState<PdfDownload | null>(null);
   // One id per diagnosis so network retries/double clicks can't create duplicate rows.
   const submissionId = useRef<string | null>(null);
   const answered = Object.keys(answers).length;
@@ -56,8 +56,8 @@ export default function Home() {
       privacyAccepted: consent,
     };
     try {
-      // The server saves the answers, generates the ONE finalized report and schedules the email.
-      // Safe to repeat: the same submission id always returns the same report.
+      // The server saves the answers to the Sheet, generates the finalized report and issues a
+      // 5-minute download grant. Safe to repeat: the same submission id never adds a second row.
       let response: Response | undefined;
       let data: Record<string, unknown> = {};
       for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -80,8 +80,7 @@ export default function Home() {
         );
       }
       setReport(data.report as FinalReport);
-      setAccess({ id: String(data.reportId), token: String(data.accessToken) });
-      setEmailStatus((data.email as EmailStatusView) ?? null);
+      setDownload(data.download as PdfDownload);
       setStep(3);
       window.scrollTo({ top: 0 });
     } catch (e) {
@@ -94,34 +93,6 @@ export default function Home() {
       setBusy(false);
     }
   }
-
-  // While the email is still being sent, keep the status line truthful by asking the server.
-  useEffect(() => {
-    if (!access || emailStatus?.state !== 'sending') return;
-    let cancelled = false;
-    let tries = 0;
-    const timer = setInterval(async () => {
-      tries += 1;
-      try {
-        const res = await fetch(`/api/report/${access.id}`, {
-          headers: { 'x-report-token': access.token },
-          cache: 'no-store',
-        });
-        if (res.ok && !cancelled) {
-          const next = (await res.json()).email as EmailStatusView;
-          setEmailStatus(next);
-          if (next.state !== 'sending') clearInterval(timer);
-        }
-      } catch {
-        /* keep the last known status */
-      }
-      if (tries >= 20) clearInterval(timer);
-    }, 4000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [access, emailStatus?.state]);
 
   return (
     <div className="shell">
@@ -309,13 +280,7 @@ export default function Home() {
           )}
         </main>
       )}
-      {step === 3 && report && (
-        <ReportView
-          report={report}
-          email={emailStatus}
-          pdf={access ? { url: `/api/report/${access.id}/pdf`, token: access.token } : null}
-        />
-      )}
+      {step === 3 && report && <ReportView report={report} pdf={download} />}
       {busy && (
         <div className="generating" role="status" aria-live="polite">
           <div className="generating-card">
