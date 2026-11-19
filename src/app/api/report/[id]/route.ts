@@ -11,7 +11,7 @@ const json = (body: unknown, status = 200) =>
   NextResponse.json(body, { status, headers: NO_STORE });
 
 /**
- * Returns the stored finalized report and the real email status. Never calls Claude.
+ * Returns the stored finalized report and the real email status. Never calls the AI provider.
  * Requires the access token issued with the report; unknown ids and wrong tokens look identical.
  */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {

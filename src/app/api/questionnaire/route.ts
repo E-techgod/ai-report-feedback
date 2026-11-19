@@ -5,7 +5,7 @@ import { NO_STORE, getPipelineDeps, reportTokenSecret } from '@/lib/services';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-// Report generation (Claude, up to ~40 s) happens inside this request; email runs after it.
+// Report generation (AI narrative, up to ~40 s) happens inside this request; email runs after it.
 export const maxDuration = 60;
 
 export async function POST(req: Request) {

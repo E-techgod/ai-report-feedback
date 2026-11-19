@@ -9,13 +9,13 @@ single stored object, so they can never disagree.
 Browser ──POST /api/questionnaire──▶ validate (consent required) + IP rate limit
                                       │
                                       ├─ 1. append header-mapped row to Google Sheets
-                                      ├─ 2. createReport():  rules engine + Claude (tool-use, zod-validated,
+                                      ├─ 2. createReport():  rules engine + AI narrative (Groq/Anthropic, zod-validated,
                                       │      1 bounded retry) → FinalReport → frozen → stored in Postgres
                                       │      (AI failed? stored as narrativeSource="template" and labelled so)
                                       ├─ 3. response: finalized report + access token + email status
                                       └─ 4. after(): claim send → render PDF → Resend → record "accepted"
 
-Browser ──GET /api/report/:id──▶ stored report + real email status (no Claude call)   [x-report-token]
+Browser ──GET /api/report/:id──▶ stored report + real email status (no AI call)   [x-report-token]
 Browser ──GET /api/report/:id/pdf──▶ PDF rendered from the stored report              [x-report-token]
 Resend  ──POST /api/webhooks/resend──▶ delivered / bounced / complained (Svix-signed)
 Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ retries pending/failed sends   [CRON_SECRET]
@@ -24,7 +24,8 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 - `src/lib/final-report.ts` – the immutable report (zod schema, SHA-256 integrity hash, access token).
 - `src/lib/report-content.ts` – every customer-visible string. `ReportView`, the PDF and the email all
   render from it. **Edit wording here.**
-- `src/lib/narrative.ts` – Claude call. Output is forced through a tool schema and re-validated.
+- `src/lib/narrative.ts` – AI call through a provider adapter (`groq` default, `anthropic` explicit). Output is forced into a schema (Groq: strict `json_schema`, low reasoning effort) and re-validated with zod; 429s honor a short `Retry-After`.
+- `src/lib/ai-share.ts` – keeps AI text ≤15% of the visible report words; `createReport()` falls back to template text if exceeded.
 - `src/lib/store.ts` + `db/schema.sql` – Postgres (Neon). Questionnaire responses stay in Sheets only.
 - `src/lib/pipeline.ts` – create report, send email (atomic claim), recovery sweep.
 - `src/lib/email.ts` – Resend client, subject/plain text, webhook signature check.
@@ -57,17 +58,18 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 
 ## Required configuration (see `.env.example`)
 
-| Variable                                             | Purpose                                                                                                 |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                                       | Neon Postgres. Run `npm run db:migrate` once (creates `reports`, `report_email_events`, `rate_limits`). |
-| `REPORT_TOKEN_SECRET`                                | ≥ 32 random chars; signs per-report access tokens.                                                      |
-| `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_REPLY_TO`     | Resend; the sender domain must be verified (SPF + DKIM DNS records).                                    |
-| `RESEND_WEBHOOK_SECRET`                              | Resend webhook (`/api/webhooks/resend`; events: delivered, bounced, complained, delivery_delayed).      |
-| `REPORT_EMAIL_ENABLED`                               | `true` only after migration approval.                                                                   |
-| `REPORT_EMAIL_ALLOWLIST`                             | Optional test gate: when set, only these comma-separated addresses are ever emailed (see below).        |
-| `APP_URL`                                            | Public base URL (email logo).                                                                           |
-| `CRON_SECRET`                                        | Vercel Cron bearer secret. The recovery sweep runs once a day (see "Recovery schedule").                |
-| `GOOGLE_*`, `ANTHROPIC_*`, `NEXT_PUBLIC_BOOKING_URL` | Existing. Redeploy after changing the booking URL.                                                      |
+| Variable                                             | Purpose                                                                                                                                                                |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                                       | Neon Postgres. Run `npm run db:migrate` once (creates `reports`, `report_email_events`, `rate_limits`).                                                                |
+| `REPORT_TOKEN_SECRET`                                | ≥ 32 random chars; signs per-report access tokens.                                                                                                                     |
+| `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_REPLY_TO`     | Resend; the sender domain must be verified (SPF + DKIM DNS records).                                                                                                   |
+| `RESEND_WEBHOOK_SECRET`                              | Resend webhook (`/api/webhooks/resend`; events: delivered, bounced, complained, delivery_delayed).                                                                     |
+| `REPORT_EMAIL_ENABLED`                               | `true` only after migration approval.                                                                                                                                  |
+| `REPORT_EMAIL_ALLOWLIST`                             | Optional test gate: when set, only these comma-separated addresses are ever emailed (see below).                                                                       |
+| `APP_URL`                                            | Public base URL (email logo).                                                                                                                                          |
+| `CRON_SECRET`                                        | Vercel Cron bearer secret. The recovery sweep runs once a day (see "Recovery schedule").                                                                               |
+| `AI_PROVIDER`, `GROQ_API_KEY`, `GROQ_MODEL`          | `groq` is the default when `AI_PROVIDER` is unset. Set `AI_PROVIDER` explicitly in production and verify it before deploying; a missing key only yields template text. |
+| `GOOGLE_*`, `ANTHROPIC_*`, `NEXT_PUBLIC_BOOKING_URL` | Existing. `ANTHROPIC_*` is used only with `AI_PROVIDER=anthropic`. Redeploy after changing the booking URL.                                                            |
 
 ### Resetting the per-email limit (development only)
 

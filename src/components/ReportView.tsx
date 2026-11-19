@@ -92,9 +92,8 @@ function AiBox({ title, limit, text }: { title: string; limit: string; text: str
       <p className={s.aiContent}>{text}</p>
       {team && (
         <p className={s.aiMeta}>
-          Origen del texto:{' '}
-          <b>{aiUsed ? 'Claude' : 'plantilla determinística (IA no disponible)'}</b>. La IA solo
-          redacta; no calcula ni decide.
+          Origen del texto: <b>{aiUsed ? 'IA' : 'plantilla determinística (IA no disponible)'}</b>.
+          La IA solo redacta; no calcula ni decide.
         </p>
       )}
     </div>
@@ -274,7 +273,7 @@ export default function ReportView({
                   <i className={cx(s.dot, s.dotDet)} /> Azul · Motor determinístico
                 </div>
                 <div className={s.legendRow}>
-                  <i className={cx(s.dot, s.dotAi)} /> Morado · Espacio para Claude
+                  <i className={cx(s.dot, s.dotAi)} /> Morado · Espacio para IA
                 </div>
                 <div className={s.legendRow}>
                   <i className={cx(s.dot, s.dotStatic)} /> Gris · Interfaz fija
@@ -371,7 +370,7 @@ export default function ReportView({
                 <SourceLine
                   kind="det"
                   tag="REGLAS · RESULTADOS"
-                  note="Los datos y hallazgos proceden del motor, nunca de Claude."
+                  note="Los datos y hallazgos proceden del motor, nunca de la IA."
                 />
               </div>
               <AiBox
@@ -421,7 +420,7 @@ export default function ReportView({
               <SourceLine
                 kind="det"
                 tag="REGLAS · RANKING"
-                note="Claude no selecciona ni reordena ninguna prioridad."
+                note="La IA no selecciona ni reordena ninguna prioridad."
               />
               {c.priorities.empty ? (
                 <div className={s.allGood}>
@@ -555,7 +554,7 @@ export default function ReportView({
                   Meta de diseño aproximada, no una medición exacta de palabras.
                 </p>
                 <hr className={s.noteDivider} />
-                <h3>Claude solo llena {1 + model.priorities.length} espacios</h3>
+                <h3>La IA solo llena {1 + model.priorities.length} espacios</h3>
                 <ol className={s.rightNote}>
                   <li>Un resumen ejecutivo (hasta {MAX_SUMMARY_WORDS} palabras).</li>
                   {model.priorities.map((p) => (

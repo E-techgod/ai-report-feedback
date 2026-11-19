@@ -242,7 +242,13 @@ export function fallbackNarrative(model: ReportModel): Narrative {
 }
 
 /** Structured contract for the AI output: exact priority count and word limits. */
-export function narrativeSchema(priorityCount: number) {
+export function narrativeSchema(
+  priorityCount: number,
+  limits: { summary: number; context: number } = {
+    summary: MAX_SUMMARY_WORDS,
+    context: MAX_CONTEXT_WORDS,
+  },
+) {
   const text = (maxWords: number) =>
     z
       .string()
@@ -250,15 +256,19 @@ export function narrativeSchema(priorityCount: number) {
       .refine((v) => wordCount(v) > 0 && wordCount(v) <= maxWords);
   return z
     .object({
-      executiveSummary: text(MAX_SUMMARY_WORDS),
-      priorityContexts: z.array(text(MAX_CONTEXT_WORDS)).length(priorityCount),
+      executiveSummary: text(limits.summary),
+      priorityContexts: z.array(text(limits.context)).length(priorityCount),
     })
     .strict();
 }
 
 /** Accepts the AI output only if it matches the contract exactly; otherwise null. */
-export function validateNarrative(candidate: unknown, priorityCount: number): Narrative | null {
-  const parsed = narrativeSchema(priorityCount).safeParse(candidate);
+export function validateNarrative(
+  candidate: unknown,
+  priorityCount: number,
+  limits?: { summary: number; context: number },
+): Narrative | null {
+  const parsed = narrativeSchema(priorityCount, limits).safeParse(candidate);
   return parsed.success ? parsed.data : null;
 }
 
