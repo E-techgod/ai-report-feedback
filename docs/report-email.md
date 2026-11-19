@@ -18,7 +18,7 @@ Browser ──POST /api/questionnaire──▶ validate (consent required) + IP 
 Browser ──GET /api/report/:id──▶ stored report + real email status (no Claude call)   [x-report-token]
 Browser ──GET /api/report/:id/pdf──▶ PDF rendered from the stored report              [x-report-token]
 Resend  ──POST /api/webhooks/resend──▶ delivered / bounced / complained (Svix-signed)
-Vercel Cron ──GET /api/cron/retry-emails (every 10 min)──▶ retries pending/failed sends   [CRON_SECRET]
+Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ retries pending/failed sends   [CRON_SECRET]
 ```
 
 - `src/lib/final-report.ts` – the immutable report (zod schema, SHA-256 integrity hash, access token).
@@ -56,8 +56,34 @@ Vercel Cron ──GET /api/cron/retry-emails (every 10 min)──▶ retries pen
 | `RESEND_WEBHOOK_SECRET`                              | Resend webhook (`/api/webhooks/resend`; events: delivered, bounced, complained, delivery_delayed).      |
 | `REPORT_EMAIL_ENABLED`                               | `true` only after migration approval.                                                                   |
 | `APP_URL`                                            | Public base URL (email logo).                                                                           |
-| `CRON_SECRET`                                        | Vercel Cron bearer secret. The 10-minute schedule in `vercel.json` needs a Vercel plan that allows it.  |
+| `CRON_SECRET`                                        | Vercel Cron bearer secret. The recovery sweep runs once a day (see "Recovery schedule").                |
 | `GOOGLE_*`, `ANTHROPIC_*`, `NEXT_PUBLIC_BOOKING_URL` | Existing. Redeploy after changing the booking URL.                                                      |
+
+## Recovery schedule (Vercel Hobby: once a day)
+
+Vercel Hobby only accepts cron jobs that run at most once per day, so `vercel.json` schedules
+`/api/cron/retry-emails` at `0 12 * * *` (12:00 UTC, 06:00 in Mexico City). The endpoint path and its
+`CRON_SECRET` bearer check are unchanged, and so is the retry/idempotency logic.
+
+- **Normal case is unaffected.** The first send happens immediately, right after the report is stored
+  (`after()` in `POST /api/questionnaire`). It does not wait for the cron.
+- **That first send is the only prompt attempt.** If it fails (provider error, instance died) the next
+  attempt is the next daily sweep. The 1/5/15/60 min backoff values are _minimum_ delays, so the real
+  delay before a retry can be up to ~24 h.
+- **Retry window gap.** The sweep only retries reports younger than 12 h (`maxAgeMs`, kept below the
+  provider's 24 h idempotency window). A report is therefore only recoverable if the 12:00 UTC sweep
+  falls within 12 h of its creation, i.e. reports created between 00:00 and 12:00 UTC (18:00–06:00
+  Mexico City). A first-send failure for a report created between 12:00 and 24:00 UTC
+  (06:00–18:00 Mexico City) is **not** retried automatically and the email is not sent.
+- **Status shown to the user.** A failed attempt that will not be retried is still stored as `failed`,
+  which the page shows as "Enviando…" (retry pending), not as an error. It becomes an error only for
+  permanent failures or after the attempt budget is spent.
+- `processDueEmails` is safe to run by hand or concurrently (atomic claims), so an operator can call
+  the endpoint with the `CRON_SECRET` bearer to recover stuck sends.
+
+Options if this gap matters (none applied here; the retry logic was deliberately left unchanged):
+raise `maxAgeMs` to just under 24 h so the daily sweep covers every report; move to a Vercel plan that
+allows frequent crons and restore a short schedule; or trigger the endpoint from an external scheduler.
 
 ## Legacy Apps Script (not touched)
 
