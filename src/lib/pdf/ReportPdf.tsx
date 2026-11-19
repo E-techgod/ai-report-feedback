@@ -39,7 +39,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
   Font.registerHyphenationCallback((word) => [word]);
   const styles = StyleSheet.create({
     page: {
-      paddingTop: 84,
+      paddingTop: 100,
       paddingBottom: 56,
       paddingHorizontal: 42,
       fontFamily: 'Helvetica',
@@ -59,7 +59,15 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       borderBottomColor: C.line,
       paddingBottom: 10,
     },
-    logo: { width: 82, height: 36 },
+    logoBox: {
+      width: 110,
+      height: 48,
+      backgroundColor: '#000000',
+      borderRadius: 4,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    logo: { width: 100, height: 44, objectFit: 'contain' },
     brandText: { fontSize: 8, letterSpacing: 1.2, color: C.muted, textTransform: 'uppercase' },
     footer: {
       position: 'absolute',
@@ -103,7 +111,13 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       textTransform: 'uppercase',
       marginBottom: 4,
     },
-    scoreNumber: { fontSize: 30, fontFamily: 'Helvetica-Bold', color: C.forest },
+    scoreNumber: {
+      fontSize: 30,
+      lineHeight: 1.05,
+      marginBottom: 6,
+      fontFamily: 'Helvetica-Bold',
+      color: C.forest,
+    },
     scoreOf: { fontSize: 13, color: C.muted },
     level: {
       fontSize: 9,
@@ -114,7 +128,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       paddingHorizontal: 7,
       borderRadius: 8,
       alignSelf: 'flex-start',
-      marginTop: 4,
+      marginTop: 6,
     },
     levelGreen: { color: C.forest, backgroundColor: C.greenBg },
     barTrack: { height: 6, backgroundColor: C.line, borderRadius: 3, marginTop: 8 },
@@ -128,7 +142,13 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       marginBottom: 8,
     },
     secNumber: { fontSize: 18, fontFamily: 'Helvetica-Bold', color: C.gold },
-    h2: { fontSize: 15, fontFamily: 'Helvetica-Bold', color: C.forest },
+    h2: {
+      lineHeight: 1.2,
+      marginBottom: 2,
+      fontSize: 15,
+      fontFamily: 'Helvetica-Bold',
+      color: C.forest,
+    },
     secSub: { fontSize: 9.5, color: C.muted },
     panel: { backgroundColor: C.soft, borderRadius: 6, padding: 12, marginBottom: 8 },
     h3: { fontSize: 11, fontFamily: 'Helvetica-Bold', color: C.forest, marginBottom: 4 },
@@ -259,7 +279,13 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
         <Page size="A4" style={styles.page}>
           <View style={styles.header} fixed>
             {/* eslint-disable-next-line jsx-a11y/alt-text -- react-pdf Image is not a DOM img */}
-            {logo ? <Image style={styles.logo} src={{ data: logo, format: 'png' }} /> : <Text />}
+            {logo ? (
+              <View style={styles.logoBox}>
+                <Image style={styles.logo} src={{ data: logo, format: 'png' }} />
+              </View>
+            ) : (
+              <Text />
+            )}
             <Text style={styles.brandText}>{c.brand}</Text>
           </View>
           <View style={styles.footer} fixed>

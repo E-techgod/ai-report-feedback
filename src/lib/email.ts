@@ -54,10 +54,10 @@ export function buildEmail(report: FinalReport, opts: { siteUrl?: string | null 
 <html lang="es"><body style="margin:0;padding:0;background:#f4f3ee;font-family:Arial,Helvetica,sans-serif;color:#162a20">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f3ee"><tr><td align="center" style="padding:24px 12px">
 <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden">
-<tr><td style="padding:24px 32px;border-bottom:1px solid #e1e8df">${
+<tr><td style="padding:14px 32px;background:#000000">${
     logo
       ? `<img src="${esc(logo)}" alt="Quirón Arquitectos Financieros" width="120" style="display:block;border:0">`
-      : `<strong style="letter-spacing:2px;color:#143b2c;font-size:18px">QUIRÓN</strong>`
+      : `<strong style="letter-spacing:2px;color:#ffffff;font-size:18px">QUIRÓN</strong>`
   }</td></tr>
 <tr><td style="padding:28px 32px 8px">
 <p style="margin:0 0 6px;font-size:12px;letter-spacing:1.5px;color:#be925a;text-transform:uppercase">${esc(c.brand)}</p>
