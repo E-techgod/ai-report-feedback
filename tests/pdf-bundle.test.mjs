@@ -20,7 +20,7 @@ const nextConfig = configModule.default ?? configModule;
  */
 const root = fileURLToPath(new URL('..', import.meta.url));
 const pdfkitDir = path.join(root, 'node_modules', 'pdfkit');
-const PDF_ROUTES = ['/api/report/[id]/pdf', '/api/questionnaire', '/api/cron/retry-emails'];
+const PDF_ROUTES = ['/api/report/pdf'];
 const FONT_GLOB = './node_modules/pdfkit/js/standard-fonts/**/*.cjs';
 
 function walk(dir) {

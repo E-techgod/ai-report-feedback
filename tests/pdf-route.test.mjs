@@ -1,109 +1,161 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reportAccessToken } from '../src/lib/final-report.ts';
+import { issueDownloadGrant } from '../src/lib/download-grant.ts';
 import { handlePdfDownload } from '../src/lib/report-pdf-handler.ts';
-import { fingerprintOf, sampleReport } from './helpers/fixtures.mjs';
-import { harness } from './helpers/pipeline-harness.mjs';
+import { renderReportPdf } from '../src/lib/pdf/ReportPdf.tsx';
+import { sampleReport } from './helpers/fixtures.mjs';
+import { T0 } from './helpers/flow-harness.mjs';
 
-test('PDF response uses the stored report and never waits on slow Sheet synchronization', async () => {
-  const { deps, store } = await harness({ emailEnabled: false }).build();
-  const report = sampleReport();
-  const { record } = await store.insertReport({
-    report,
-    email: 'a@b.com',
-    fingerprint: fingerprintOf('a@b.com'),
-    emailStatus: 'disabled',
-    now: new Date(),
-  });
-  const tasks = [];
-  let release;
-  let syncStarted = false;
-  deps.syncTracking = () => {
-    syncStarted = true;
-    return new Promise((resolve) => {
-      release = resolve;
-    });
+const SECRET = 's'.repeat(32);
+const at = (ms) => () => new Date(T0 + ms);
+
+function setup() {
+  const rendered = [];
+  return {
+    rendered,
+    renderPdf: async (report) => {
+      rendered.push(report);
+      return Buffer.from('%PDF-fake');
+    },
   };
-  const secret = 's'.repeat(32);
-  const req = new Request('https://example.com/api/report/pdf', {
-    headers: { 'x-report-token': reportAccessToken(record.id, secret) },
+}
+
+const post = (report, token, { raw } = {}) =>
+  new Request('https://example.com/api/report/pdf', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { 'x-download-token': token } : {}),
+    },
+    body: raw ?? JSON.stringify(report),
   });
-  const response = await handlePdfDownload(req, record.id, deps, secret, (task) =>
-    tasks.push(task),
-  );
-  assert.equal(response.status, 200);
-  assert.equal(Buffer.from(await response.arrayBuffer()).toString(), '%PDF-fake');
-  assert.ok((await store.getById(record.id)).pdfDownloadedAt);
-  assert.equal(syncStarted, false);
-  assert.equal(tasks.length, 1);
-  const pending = tasks[0]();
-  assert.equal(syncStarted, true);
-  release(true);
-  await pending;
+
+const download = (s, report, token, offsetMs = 1_000, extra) =>
+  handlePdfDownload(post(report, token, extra), {
+    secret: SECRET,
+    renderPdf: s.renderPdf,
+    now: at(offsetMs),
+  });
+
+test('a valid grant downloads the PDF, repeatedly, until the five minutes are over', async () => {
+  const s = setup();
+  const report = sampleReport();
+  const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
+  for (const offset of [1_000, 90_000, 299_999]) {
+    const response = await download(s, report, token, offset);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'application/pdf');
+    assert.match(response.headers.get('cache-control') ?? '', /no-store/);
+    assert.match(
+      response.headers.get('content-disposition') ?? '',
+      /Diagnostico-Patrimonial-Quiron-Prueba\.pdf/,
+    );
+    assert.equal(Buffer.from(await response.arrayBuffer()).toString(), '%PDF-fake');
+  }
+  assert.equal(s.rendered.length, 3);
+  assert.deepEqual(s.rendered[0], report, 'the PDF is rendered from the presented report');
 });
 
-test('a failed PDF render is logged by name, returns a no-store 500 and records no download', async () => {
-  const { deps, store } = await harness({ emailEnabled: false }).build();
-  const { record } = await store.insertReport({
-    report: sampleReport(),
-    email: 'a@b.com',
-    fingerprint: fingerprintOf('a@b.com'),
-    emailStatus: 'disabled',
-    now: new Date(),
-  });
-  deps.renderPdf = async () => {
-    throw new Error("Cannot find module 'pdfkit/js/standard-fonts/Helvetica.cjs'");
-  };
-  const secret = 's'.repeat(32);
+test('after five minutes the same previously valid token is refused and nothing is rendered', async () => {
+  const s = setup();
+  const report = sampleReport();
+  const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
+  assert.equal((await download(s, report, token, 299_000)).status, 200);
+  for (const offset of [300_000, 301_000, 3_600_000]) {
+    const response = await download(s, report, token, offset);
+    assert.equal(response.status, 410);
+    assert.match(response.headers.get('cache-control') ?? '', /no-store/);
+    assert.equal((await response.json()).error, 'Your download session has expired.');
+  }
+  assert.equal(s.rendered.length, 1);
+});
+
+test('invalid or tampered tokens are rejected', async () => {
+  const s = setup();
+  const report = sampleReport();
+  const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
+  const [exp, sig] = token.split('.');
+  const flipped = `${sig.slice(0, -1)}${sig.endsWith('0') ? '1' : '0'}`;
+  for (const bad of [
+    undefined,
+    '',
+    'garbage',
+    `${exp}.${flipped}`,
+    `${Number(exp) + 600_000}.${sig}`,
+  ])
+    assert.equal((await download(s, report, bad)).status, 401, String(bad));
+  const otherSecret = issueDownloadGrant(report, 'x'.repeat(32), new Date(T0)).token;
+  assert.equal((await download(s, report, otherSecret)).status, 401);
+  assert.equal(s.rendered.length, 0);
+});
+
+test("a different submission's token cannot download another client's report", async () => {
+  const s = setup();
+  const mine = sampleReport();
+  const theirs = sampleReport();
+  const mineToken = issueDownloadGrant(mine, SECRET, new Date(T0)).token;
+  const theirToken = issueDownloadGrant(theirs, SECRET, new Date(T0)).token;
+  assert.equal((await download(s, theirs, mineToken)).status, 401);
+  assert.equal((await download(s, mine, theirToken)).status, 401);
+  assert.equal(s.rendered.length, 0);
+  assert.equal((await download(s, theirs, theirToken)).status, 200);
+});
+
+test('a report edited after issue (answers-derived data or AI text) is refused', async () => {
+  const s = setup();
+  const report = sampleReport();
+  const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
+  const edited = { ...report, narrative: { ...report.narrative, executiveSummary: 'Otro texto.' } };
+  const rescored = { ...report, model: { ...report.model, level: 'Excelente' } };
+  assert.equal((await download(s, edited, token)).status, 401);
+  assert.equal((await download(s, rescored, token)).status, 401);
+  assert.equal(s.rendered.length, 0);
+});
+
+test('malformed or oversized bodies are rejected before any rendering', async () => {
+  const s = setup();
+  const report = sampleReport();
+  const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
+  assert.equal((await download(s, null, token, 1_000, { raw: '{nope' })).status, 400);
+  assert.equal((await download(s, { hello: 'world' }, token)).status, 400);
+  assert.equal((await download(s, null, token, 1_000, { raw: 'x'.repeat(100_001) })).status, 413);
+  assert.equal(s.rendered.length, 0);
+});
+
+test('a failed render is logged by name, returns a no-store 500 and leaks no report content', async () => {
+  const report = sampleReport();
+  const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
   const logged = [];
   const originalError = console.error;
   console.error = (...args) => logged.push(args.join(' '));
   let response;
   try {
-    response = await handlePdfDownload(
-      new Request('https://example.com/api/report/pdf', {
-        headers: { 'x-report-token': reportAccessToken(record.id, secret) },
-      }),
-      record.id,
-      deps,
-      secret,
-      () => {
-        throw new Error('must not schedule tracking for a failed download');
+    response = await handlePdfDownload(post(report, token), {
+      secret: SECRET,
+      now: at(1_000),
+      renderPdf: async () => {
+        throw new Error("Cannot find module 'pdfkit/js/standard-fonts/Helvetica.cjs'");
       },
-    );
+    });
   } finally {
     console.error = originalError;
   }
   assert.equal(response.status, 500);
   assert.match(response.headers.get('cache-control') ?? '', /no-store/);
-  assert.equal((await response.arrayBuffer()).byteLength, 0);
-  assert.equal((await store.getById(record.id)).pdfDownloadedAt, null);
-  assert.equal(logged.length, 1);
-  assert.match(logged[0], new RegExp(`^\\[pdf\\] report ${record.id}: render-failed: .*Helvetica`));
+  assert.ok(logged.some((line) => line.includes('[pdf] render-failed')));
+  assert.ok(!logged.join(' ').includes(report.firstName));
 });
 
-test('PDF handler rejects missing access token before reading a report', async () => {
-  let reads = 0;
-  const deps = {
-    store: {
-      async hit() {
-        return 1;
-      },
-      async getById() {
-        reads += 1;
-        return null;
-      },
-    },
-  };
-  const response = await handlePdfDownload(
-    new Request('https://example.com/api/report/pdf'),
-    crypto.randomUUID(),
-    deps,
-    's'.repeat(32),
-    () => {
-      throw new Error('must not schedule');
-    },
-  );
-  assert.equal(response.status, 404);
-  assert.equal(reads, 0);
+test('the real renderer produces a PDF from a report that went through JSON', async () => {
+  const report = sampleReport({ source: 'ai' });
+  const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
+  const received = JSON.parse(JSON.stringify(report));
+  const response = await handlePdfDownload(post(received, token), {
+    secret: SECRET,
+    renderPdf: renderReportPdf,
+    now: at(1_000),
+  });
+  assert.equal(response.status, 200);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
 });

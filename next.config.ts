@@ -18,11 +18,9 @@ const PDF_RUNTIME_FILES = [
 const nextConfig: NextConfig = {
   // ESM-only PDF renderer: load it from node_modules at runtime instead of bundling it.
   serverExternalPackages: ['@react-pdf/renderer'],
-  // Every function that renders the PDF (download, email attachment on submit, email retry cron).
+  // The only function that renders the PDF is the download route.
   outputFileTracingIncludes: {
-    '/api/questionnaire': PDF_RUNTIME_FILES,
-    '/api/cron/retry-emails': PDF_RUNTIME_FILES,
-    '/api/report/[id]/pdf': PDF_RUNTIME_FILES,
+    '/api/report/pdf': PDF_RUNTIME_FILES,
   },
 };
 
