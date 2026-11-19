@@ -22,6 +22,12 @@ export const TOOL_NAME = 'entregar_redaccion';
 const ATTEMPT_TIMEOUT_MS = 20_000;
 const TOTAL_BUDGET_MS = 38_000;
 const MAX_ATTEMPTS = 2;
+/** Longest Retry-After we are willing to wait for; a longer one ends the AI step at once. */
+const MAX_RETRY_AFTER_MS = 8_000;
+/** Pause after a 429 that carries no usable Retry-After. */
+const DEFAULT_RATE_LIMIT_PAUSE_MS = 1_000;
+/** A retry is pointless unless this much of the total budget is left after the pause. */
+const MIN_RETRY_WINDOW_MS = 3_000;
 
 /** Groq is the default; anthropic must be selected explicitly with AI_PROVIDER=anthropic. */
 export const DEFAULT_PROVIDER = 'groq';
@@ -37,6 +43,8 @@ export type NarrativeConfig = {
   attemptTimeoutMs?: number;
   totalBudgetMs?: number;
   maxAttempts?: number;
+  /** Test seam for the Retry-After pause. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 export function systemPrompt(priorityCount: number, delivery: 'tool' | 'json' = 'tool'): string {
@@ -169,7 +177,14 @@ const ADAPTERS: Record<string, ProviderAdapter> = { groq, anthropic };
 
 type Attempt =
   | { ok: true; narrative: NonNullable<ReturnType<typeof validateNarrative>> }
-  | { ok: false; reason: string; retryable: boolean };
+  | { ok: false; reason: string; retryable: boolean; retryAfterMs?: number };
+
+/** Retry-After in seconds (Groq documents seconds). Returns null when absent or unusable. */
+export function parseRetryAfterMs(header: string | null): number | null {
+  if (header === null) return null;
+  const seconds = Number(header.trim());
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds * 1000) : null;
+}
 
 async function attempt(
   model: ReportModel,
@@ -189,9 +204,14 @@ async function attempt(
       headers: cfg.adapter.headers(cfg.apiKey),
       body: JSON.stringify(cfg.adapter.body(cfg.modelId, model)),
     });
+    if (response.status === 429) {
+      // Never read or log the body: only the pause the provider asks for.
+      const retryAfterMs =
+        parseRetryAfterMs(response.headers.get('retry-after')) ?? DEFAULT_RATE_LIMIT_PAUSE_MS;
+      return { ok: false, reason: 'rate-limited', retryable: true, retryAfterMs };
+    }
     if (!response.ok) {
-      const retryable = response.status === 429 || response.status >= 500;
-      return { ok: false, reason: `http-${response.status}`, retryable };
+      return { ok: false, reason: `http-${response.status}`, retryable: response.status >= 500 };
     }
     const narrative = validateNarrative(cfg.adapter.extract(await response.json()), count);
     if (!narrative) return { ok: false, reason: 'invalid-output', retryable: true };
@@ -243,6 +263,18 @@ export async function generateNarrative(
     reason = result.reason;
     console.warn(`[narrative] attempt ${n}/${maxAttempts} failed: ${reason}`);
     if (!result.retryable) break;
+    if (result.retryAfterMs !== undefined && n < maxAttempts) {
+      // Wait for the provider's Retry-After only if it is short and a retry still fits the budget.
+      const left = budget - (Date.now() - started);
+      if (
+        result.retryAfterMs > MAX_RETRY_AFTER_MS ||
+        left - result.retryAfterMs < MIN_RETRY_WINDOW_MS
+      )
+        break;
+      await (config.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms))))(
+        result.retryAfterMs,
+      );
+    }
   }
   return template(reason);
 }

@@ -165,3 +165,84 @@ test('unusable Groq output is never trusted: bad JSON, extra keys, wrong count, 
   );
   assert.equal(empty.failureReason, 'invalid-output');
 });
+
+const rateLimited = (retryAfter) =>
+  new Response('{"error":{"message":"secret-ish provider detail"}}', {
+    status: 429,
+    headers: retryAfter === undefined ? {} : { 'retry-after': String(retryAfter) },
+  });
+
+test('429 with a short Retry-After waits that long once, then succeeds', async () => {
+  let calls = 0;
+  const pauses = [];
+  const out = await generateNarrative(
+    model,
+    cfg(async () => (calls++ === 0 ? rateLimited(2) : groqReply(good)), {
+      sleep: async (ms) => void pauses.push(ms),
+    }),
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(pauses, [2000]);
+  assert.equal(out.source, 'ai');
+});
+
+test('429 without Retry-After pauses briefly; a persistent 429 ends as a rate-limited template', async () => {
+  const pauses = [];
+  let calls = 0;
+  const out = await generateNarrative(
+    model,
+    cfg(async () => (calls++, rateLimited()), { sleep: async (ms) => void pauses.push(ms) }),
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(pauses, [1000]);
+  assert.equal(out.source, 'template');
+  assert.equal(out.failureReason, 'rate-limited');
+  assert.ok(!JSON.stringify(out).includes('secret-ish'), 'provider bodies are never kept');
+});
+
+test('a long Retry-After or an exhausted budget is not waited for', async () => {
+  let calls = 0;
+  const pauses = [];
+  const sleep = async (ms) => void pauses.push(ms);
+  const long = await generateNarrative(
+    model,
+    cfg(async () => (calls++, rateLimited(60)), { sleep }),
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(pauses, []);
+  assert.equal(long.failureReason, 'rate-limited');
+
+  calls = 0;
+  const tight = await generateNarrative(
+    model,
+    cfg(async () => (calls++, rateLimited(5)), { sleep, totalBudgetMs: 6000 }),
+  );
+  assert.equal(calls, 1, 'a retry that cannot fit the budget is skipped');
+  assert.deepEqual(pauses, []);
+  assert.equal(tight.failureReason, 'rate-limited');
+});
+
+test('Groq timeouts are reported as timeout and fall back to the template', async () => {
+  const hang = (_u, init) =>
+    new Promise((_res, rej) =>
+      init.signal.addEventListener('abort', () =>
+        rej(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+      ),
+    );
+  const out = await generateNarrative(
+    model,
+    cfg(hang, { attemptTimeoutMs: 50, totalBudgetMs: 3000 }),
+  );
+  assert.equal(out.source, 'template');
+  assert.equal(out.failureReason, 'timeout');
+});
+
+test('Groq auth errors are not retried', async () => {
+  let calls = 0;
+  const out = await generateNarrative(
+    model,
+    cfg(async () => (calls++, new Response('{}', { status: 401 }))),
+  );
+  assert.equal(calls, 1);
+  assert.equal(out.failureReason, 'http-401');
+});
