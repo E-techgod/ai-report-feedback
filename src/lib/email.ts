@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FinalReport } from './final-report';
+import { renderEmailHtml } from './email-html';
 import { buildReportContent } from './report-content';
 import type { ProviderEvent } from './store';
 
@@ -28,8 +29,6 @@ export class MailError extends Error {
     super(message);
   }
 }
-
-const esc = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 export function pdfFilename(firstName: string): string {
   const slug = firstName
@@ -73,53 +72,15 @@ export function buildEmail(
   const highlights = emailHighlights(c);
   const attachmentName = opts.attachmentName ?? pdfFilename(report.firstName);
   const bookingLabel = 'Agenda una asesoría con Quirón';
-  const logo = opts.siteUrl ? `${opts.siteUrl.replace(/\/$/, '')}/images/quiron-logo.png` : null;
-  const button = c.cta.url
-    ? `<a href="${esc(c.cta.url)}" style="display:inline-block;background:#be925a;color:#ffffff;text-decoration:none;font-weight:bold;padding:13px 26px;border-radius:6px;font-size:15px">${bookingLabel}</a>`
-    : `<p style="margin:0;color:#dfe9e2;font-size:13px">${esc(c.cta.unavailableNote)}</p>`;
-  const highlightRows = highlights
-    .map(
-      (h) =>
-        `<p style="margin:0 0 10px;font-size:15px;line-height:1.55"><strong style="color:#143b2c">${esc(h.label)}</strong> ${esc(h.value)}</p>`,
-    )
-    .join('\n');
-
-  const html = `<!doctype html>
-<html lang="es"><body style="margin:0;padding:0;background:#f4f3ee;font-family:Arial,Helvetica,sans-serif;color:#162a20">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f3ee"><tr><td align="center" style="padding:24px 12px">
-<table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden">
-<tr><td style="padding:14px 32px;background:#000000">${
-    logo
-      ? `<img src="${esc(logo)}" alt="Quirón Arquitectos Financieros" width="120" style="display:block;border:0">`
-      : `<strong style="letter-spacing:2px;color:#ffffff;font-size:18px">QUIRÓN</strong>`
-  }</td></tr>
-<tr><td style="padding:28px 32px 8px">
-<h1 style="margin:0 0 16px;font-size:24px;line-height:1.2;color:#143b2c">Tu diagnóstico patrimonial está listo</h1>
-<p style="margin:0 0 12px;font-size:15px;line-height:1.6">Hola, ${esc(name)}:</p>
-<p style="margin:0 0 12px;font-size:15px;line-height:1.6">Gracias por completar el cuestionario de Blindaje Patrimonial de Quirón.</p>
-<p style="margin:0;font-size:15px;line-height:1.6;color:#63756a">Hemos preparado tu diagnóstico personalizado. Aquí tienes un resumen de los resultados más importantes.</p>
-</td></tr>
-<tr><td style="padding:16px 32px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f3ee;border-radius:8px"><tr><td style="padding:18px 20px">
-<div style="font-size:12px;letter-spacing:1px;color:#63756a;text-transform:uppercase">${esc(score.label)}</div>
-<div style="font-size:38px;font-weight:bold;color:#143b2c;line-height:1.2">${esc(score.value)}</div>
-<div style="font-size:14px;font-weight:bold;color:#9a6626">${esc(score.levelLabel)}</div>
-</td></tr></table></td></tr>
-<tr><td style="padding:8px 32px 8px">
-<h2 style="margin:0 0 12px;font-size:17px;color:#143b2c">Lo más importante de tu diagnóstico</h2>
-${highlightRows}
-</td></tr>
-<tr><td style="padding:12px 32px 8px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#143b2c;border-radius:8px"><tr><td style="padding:16px 20px">
-<div style="font-size:15px;font-weight:bold;color:#ffffff">Tu informe completo está adjunto</div>
-<div style="margin-top:4px;font-size:13px;color:#dfe9e2">${esc(attachmentName)}</div>
-</td></tr></table></td></tr>
-<tr><td style="padding:16px 32px 28px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#000000;border-radius:8px"><tr><td align="center" style="padding:20px 24px">
-${button}
-</td></tr></table></td></tr>
-<tr><td style="padding:0 32px 28px;font-size:11px;line-height:1.5;color:#63756a">${esc(c.legal)}</td></tr>
-</table></td></tr></table></body></html>`;
+  const logoUrl = opts.siteUrl ? `${opts.siteUrl.replace(/\/$/, '')}/images/quiron-logo.png` : null;
+  const html = renderEmailHtml({
+    content: c,
+    name,
+    percent: report.model.score.protection,
+    highlights,
+    attachmentName,
+    logoUrl,
+  });
 
   const text = [
     'Tu diagnóstico patrimonial está listo',
