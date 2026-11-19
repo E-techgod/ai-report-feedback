@@ -23,7 +23,14 @@ const ATTEMPT_TIMEOUT_MS = 20_000;
 const TOTAL_BUDGET_MS = 38_000;
 const MAX_ATTEMPTS = 2;
 
+/** Groq is the default; anthropic must be selected explicitly with AI_PROVIDER=anthropic. */
+export const DEFAULT_PROVIDER = 'groq';
+export const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b';
+export const GROQ_SCHEMA_NAME = 'redaccion_reporte';
+
 export type NarrativeConfig = {
+  /** 'groq' (default) or 'anthropic'. Falls back to the AI_PROVIDER environment variable. */
+  provider?: string;
   apiKey?: string;
   modelId?: string;
   fetchImpl?: typeof fetch;
@@ -32,12 +39,16 @@ export type NarrativeConfig = {
   maxAttempts?: number;
 };
 
-export function systemPrompt(priorityCount: number): string {
+export function systemPrompt(priorityCount: number, delivery: 'tool' | 'json' = 'tool'): string {
+  const how =
+    delivery === 'tool'
+      ? `llamando a la herramienta ${TOOL_NAME}`
+      : 'como un objeto JSON que cumpla el esquema indicado, sin texto adicional';
   return [
     'Eres un redactor de Quirón especializado en diagnóstico patrimonial orientativo; NO das asesoría legal, financiera ni fiscal.',
     'Recibirás resultados YA calculados por reglas. Tu única tarea es redactar texto breve que los explique.',
     'No cambies ni recalcules el score ni el nivel. No agregues cifras, diagnósticos, riesgos, prioridades, coberturas, pólizas, situación familiar ni acciones nuevas. No modifiques las acciones indicadas.',
-    `Entrega el resultado llamando a la herramienta ${TOOL_NAME}: executiveSummary (un párrafo de máximo ${MAX_SUMMARY_WORDS} palabras que interprete los hallazgos) y priorityContexts (arreglo con EXACTAMENTE ${priorityCount} textos, uno por prioridad y en el mismo orden, cada uno de máximo ${MAX_CONTEXT_WORDS} palabras que expliquen por qué ese hallazgo merece atención).`,
+    `Entrega el resultado ${how}: executiveSummary (un párrafo de máximo ${MAX_SUMMARY_WORDS} palabras que interprete los hallazgos) y priorityContexts (arreglo con EXACTAMENTE ${priorityCount} textos, uno por prioridad y en el mismo orden, cada uno de máximo ${MAX_CONTEXT_WORDS} palabras que expliquen por qué ese hallazgo merece atención).`,
     'Español mexicano profesional, claro y amable. Recomienda contrastar con documentación vigente y con un especialista, sin alarmismo.',
   ].join(' ');
 }
@@ -66,6 +77,10 @@ export function toolDefinition(priorityCount: number) {
 type ProviderAdapter = {
   id: string;
   url: string;
+  /** Used when neither config nor the provider's own model variable is set. */
+  defaultModel?: string;
+  /** Names of the server-side environment variables holding this provider's credentials. */
+  env: { apiKey: string; model: string };
   headers: (apiKey: string) => Record<string, string>;
   body: (modelId: string, model: ReportModel) => unknown;
   /** Locates the (still unvalidated) JSON candidate inside the provider response. */
@@ -75,6 +90,7 @@ type ProviderAdapter = {
 const anthropic: ProviderAdapter = {
   id: 'anthropic',
   url: 'https://api.anthropic.com/v1/messages',
+  env: { apiKey: 'ANTHROPIC_API_KEY', model: 'ANTHROPIC_MODEL' },
   headers: (apiKey) => ({
     'content-type': 'application/json',
     'x-api-key': apiKey,
@@ -94,7 +110,62 @@ const anthropic: ProviderAdapter = {
   },
 };
 
-const ADAPTER: ProviderAdapter = anthropic;
+/**
+ * Groq (OpenAI-compatible). The JSON is requested with strict structured outputs. Strict mode
+ * needs every property in `required` and additionalProperties:false; the docs do not cover
+ * minItems/maxItems/minLength there, so the counts and word limits are enforced by zod after
+ * parsing. gpt-oss reasons before answering: low effort, reasoning left out of the response, and
+ * enough completion tokens that reasoning cannot truncate the JSON.
+ */
+export function groqResponseSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['executiveSummary', 'priorityContexts'],
+    properties: {
+      executiveSummary: { type: 'string' },
+      priorityContexts: { type: 'array', items: { type: 'string' } },
+    },
+  };
+}
+
+const groq: ProviderAdapter = {
+  id: 'groq',
+  url: 'https://api.groq.com/openai/v1/chat/completions',
+  defaultModel: DEFAULT_GROQ_MODEL,
+  env: { apiKey: 'GROQ_API_KEY', model: 'GROQ_MODEL' },
+  headers: (apiKey) => ({
+    'content-type': 'application/json',
+    authorization: `Bearer ${apiKey}`,
+  }),
+  body: (modelId, model) => ({
+    model: modelId,
+    temperature: 0.2,
+    max_completion_tokens: 2048,
+    reasoning_effort: 'low',
+    include_reasoning: false,
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: GROQ_SCHEMA_NAME, strict: true, schema: groqResponseSchema() },
+    },
+    messages: [
+      { role: 'system', content: systemPrompt(model.priorities.length, 'json') },
+      { role: 'user', content: JSON.stringify(buildAiInput(model)) },
+    ],
+  }),
+  extract: (data) => {
+    const text = (data as { choices?: Array<{ message?: { content?: unknown } }> } | null)
+      ?.choices?.[0]?.message?.content;
+    if (typeof text !== 'string') return undefined;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return undefined;
+    }
+  },
+};
+
+const ADAPTERS: Record<string, ProviderAdapter> = { groq, anthropic };
 
 type Attempt =
   | { ok: true; narrative: NonNullable<ReturnType<typeof validateNarrative>> }
@@ -102,24 +173,27 @@ type Attempt =
 
 async function attempt(
   model: ReportModel,
-  cfg: Required<Pick<NarrativeConfig, 'apiKey' | 'modelId'>> & { fetchImpl: typeof fetch },
+  cfg: Required<Pick<NarrativeConfig, 'apiKey' | 'modelId'>> & {
+    adapter: ProviderAdapter;
+    fetchImpl: typeof fetch;
+  },
   timeoutMs: number,
 ): Promise<Attempt> {
   const count = model.priorities.length;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await cfg.fetchImpl(ADAPTER.url, {
+    const response = await cfg.fetchImpl(cfg.adapter.url, {
       method: 'POST',
       signal: controller.signal,
-      headers: ADAPTER.headers(cfg.apiKey),
-      body: JSON.stringify(ADAPTER.body(cfg.modelId, model)),
+      headers: cfg.adapter.headers(cfg.apiKey),
+      body: JSON.stringify(cfg.adapter.body(cfg.modelId, model)),
     });
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
       return { ok: false, reason: `http-${response.status}`, retryable };
     }
-    const narrative = validateNarrative(ADAPTER.extract(await response.json()), count);
+    const narrative = validateNarrative(cfg.adapter.extract(await response.json()), count);
     if (!narrative) return { ok: false, reason: 'invalid-output', retryable: true };
     return { ok: true, narrative };
   } catch (error) {
@@ -140,8 +214,14 @@ export async function generateNarrative(
     failureReason,
   });
 
-  const apiKey = config.apiKey ?? process.env.ANTHROPIC_API_KEY;
-  const modelId = config.modelId ?? process.env.ANTHROPIC_MODEL;
+  const providerId = (config.provider ?? process.env.AI_PROVIDER ?? DEFAULT_PROVIDER)
+    .trim()
+    .toLowerCase();
+  // An unknown name (a typo) must not silently pick a provider: the report uses template text.
+  const adapter = Object.hasOwn(ADAPTERS, providerId) ? ADAPTERS[providerId] : undefined;
+  if (!adapter) return template('unknown-provider');
+  const apiKey = config.apiKey ?? process.env[adapter.env.apiKey];
+  const modelId = config.modelId ?? (process.env[adapter.env.model] || adapter.defaultModel);
   if (!apiKey || !modelId) return template('not-configured');
 
   const fetchImpl = config.fetchImpl ?? fetch;
@@ -156,7 +236,7 @@ export async function generateNarrative(
     if (remaining < 1000) break;
     const result = await attempt(
       model,
-      { apiKey, modelId, fetchImpl },
+      { adapter, apiKey, modelId, fetchImpl },
       Math.min(attemptTimeout, remaining),
     );
     if (result.ok) return { narrative: result.narrative, source: 'ai', failureReason: null };

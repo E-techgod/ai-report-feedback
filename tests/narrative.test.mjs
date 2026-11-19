@@ -14,7 +14,13 @@ const reply = (input, status = 200) =>
   new Response(JSON.stringify({ content: [{ type: 'tool_use', name: TOOL_NAME, input }] }), {
     status,
   });
-const cfg = (fetchImpl, extra = {}) => ({ apiKey: 'k', modelId: 'm', fetchImpl, ...extra });
+const cfg = (fetchImpl, extra = {}) => ({
+  provider: 'anthropic',
+  apiKey: 'k',
+  modelId: 'm',
+  fetchImpl,
+  ...extra,
+});
 
 test('valid tool output becomes an AI narrative and the request forces the schema tool', async () => {
   let body;
@@ -34,6 +40,7 @@ test('valid tool output becomes an AI narrative and the request forces the schem
 test('not configured: explicit template outcome, no network call', async () => {
   let called = false;
   const out = await generateNarrative(model, {
+    provider: 'anthropic',
     apiKey: '',
     modelId: '',
     fetchImpl: async () => ((called = true), reply(good)),
