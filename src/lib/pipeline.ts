@@ -171,8 +171,10 @@ export type DeliveryResult =
 export async function deliverReportEmail(
   deps: PipelineDeps,
   reportId: string,
+  options: { syncTracking?: boolean } = {},
 ): Promise<DeliveryResult> {
   const { store, config, mailer } = deps;
+  const project = options.syncTracking !== false;
   if (!config.emailEnabled || !mailer) return { outcome: 'not-claimed' };
   const claimed = await store.claimEmail(reportId, clock(deps), {
     maxAttempts: config.maxAttempts,
@@ -192,7 +194,7 @@ export async function deliverReportEmail(
       const reason = 'unknown-outcome-after-idempotency-window';
       console.error(`[email] report ${claimed.id} not retried: ${reason}`);
       await store.markFailed(claimed.id, reason, null, clock(deps));
-      await syncSafely(deps, reportId);
+      if (project) await syncSafely(deps, reportId);
       return { outcome: 'failed', error: reason, willRetry: false };
     }
   }
@@ -229,7 +231,7 @@ export async function deliverReportEmail(
       willRetry ? new Date(clock(deps).getTime() + delay) : null,
       clock(deps),
     );
-    await syncSafely(deps, reportId);
+    if (project) await syncSafely(deps, reportId);
     return { outcome: 'failed', error: message, willRetry };
   }
 
@@ -238,7 +240,7 @@ export async function deliverReportEmail(
   // key, which the provider de-duplicates. The error is rethrown so it stays visible.
   try {
     await store.markAccepted(claimed.id, messageId, clock(deps));
-    await syncSafely(deps, reportId);
+    if (project) await syncSafely(deps, reportId);
   } catch (error) {
     console.error(`[email] report ${claimed.id} accepted but not recorded: ${safeError(error)}`);
     throw error;
@@ -253,30 +255,29 @@ export async function deliverReportEmail(
  */
 export async function processDueEmails(
   deps: PipelineDeps,
-  options: { batchSize?: number; budgetMs?: number } = {},
+  options: { batchSize?: number; budgetMs?: number; wallNow?: () => number } = {},
 ) {
-  const { batchSize = 25, budgetMs = 45_000 } = options;
+  const { batchSize = 25, budgetMs = 45_000, wallNow = Date.now } = options;
   const { config } = deps;
   const opts = {
     maxAttempts: config.maxAttempts,
     leaseMs: config.leaseMs,
     maxAgeMs: config.maxAgeMs,
   };
-  const started = Date.now();
+  const started = wallNow();
   if (!config.emailEnabled) return { expired: 0, due: 0, accepted: 0, failed: 0, skipped: 0 };
   const expired = await deps.store.expireStale(clock(deps), opts);
   const summary = { expired: expired.length, due: 0, accepted: 0, failed: 0, skipped: 0 };
   const seen = new Set<string>();
-  while (Date.now() - started < budgetMs) {
-    const due = (await deps.store.listDueForEmail(clock(deps), batchSize, opts)).filter(
-      (id) => !seen.has(id),
-    );
+  while (wallNow() - started < budgetMs) {
+    const due = await deps.store.listDueForEmail(clock(deps), batchSize, opts, [...seen]);
     if (due.length === 0) break;
     for (const id of due) {
-      if (Date.now() - started >= budgetMs) return summary;
+      if (wallNow() - started >= budgetMs) return summary;
       seen.add(id);
       summary.due += 1;
-      const result = await deliverReportEmail(deps, id);
+      // The cron projects Sheet state in its separate, bounded tracking phase.
+      const result = await deliverReportEmail(deps, id, { syncTracking: false });
       if (result.outcome === 'accepted') summary.accepted += 1;
       else if (result.outcome === 'failed') summary.failed += 1;
       else summary.skipped += 1;

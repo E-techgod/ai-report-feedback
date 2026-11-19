@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { CRON_EMAIL_BUDGET_MS, trackingAttemptBudget, trackingDeadline } from '@/lib/cron-budget';
 import { processDueEmails } from '@/lib/pipeline';
 import { NO_STORE, getPipelineDeps, secretMatches } from '@/lib/services';
 
@@ -20,18 +21,19 @@ export async function GET(req: Request) {
   const deps = getPipelineDeps();
   if (!deps) return NextResponse.json({ ok: false }, { status: 503, headers: NO_STORE });
 
-  const summary = await processDueEmails(deps, { budgetMs: 35_000 });
+  const started = Date.now();
+  const summary = await processDueEmails(deps, { budgetMs: CRON_EMAIL_BUDGET_MS });
   // A failed Sheets write never re-sends an email: retry only the projection from Neon.
   let trackingSynced = 0;
   let trackingFailed = 0;
-  const trackingStarted = Date.now();
-  if (deps.syncTracking) {
+  const deadline = trackingDeadline(started, Date.now());
+  if (deps.syncTracking && trackingAttemptBudget(deadline, Date.now()) > 0) {
     const ids = await deps.store.listUnsynced(25);
     for (const id of ids) {
-      if (Date.now() - trackingStarted > 12_000) break;
+      const budget = trackingAttemptBudget(deadline, Date.now());
+      if (budget <= 0) break;
       try {
-        if (await deps.syncTracking(id, Math.min(8_000, 12_000 - (Date.now() - trackingStarted))))
-          trackingSynced += 1;
+        if (await deps.syncTracking(id, budget)) trackingSynced += 1;
       } catch {
         trackingFailed += 1;
         console.error(`[tracking] report ${id}: sync-failed`);

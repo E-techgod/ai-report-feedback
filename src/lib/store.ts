@@ -410,10 +410,16 @@ export function createStore(sql: SqlExecutor) {
     },
 
     /** Reports whose email still needs work: never sent, failed and due, or a stuck 'sending'. */
-    async listDueForEmail(now: Date, limit: number, opts: ClaimOptions): Promise<string[]> {
+    async listDueForEmail(
+      now: Date,
+      limit: number,
+      opts: ClaimOptions,
+      excludeIds: string[] = [],
+    ): Promise<string[]> {
       const rows = await sql(
         `select id from reports
          where email_attempts < $2 and created_at >= $3
+           and id <> all($5::uuid[])
            and (
              (email_status in ('pending', 'failed') and (email_next_attempt_at is null or email_next_attempt_at <= $1))
              or (email_status = 'sending' and email_lease_until < $1)
@@ -424,6 +430,7 @@ export function createStore(sql: SqlExecutor) {
           opts.maxAttempts,
           new Date(now.getTime() - opts.maxAgeMs).toISOString(),
           limit,
+          excludeIds,
         ],
       );
       return rows.map((r) => String(r.id));
