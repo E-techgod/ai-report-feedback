@@ -3,8 +3,7 @@
  *
  *   node --env-file=.env --import tsx scripts/db-migrate.ts
  *
- * Only creates the new `reports`, `report_email_events` and `rate_limits` tables. It never touches
- * Google Sheets or the questionnaire responses.
+ * Creates/extends the report tables. It never touches Google Sheets or questionnaire responses.
  */
 import { readFileSync } from 'node:fs';
 import { neon } from '@neondatabase/serverless';

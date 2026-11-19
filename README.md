@@ -16,7 +16,7 @@ This ZIP is a standalone Next.js app. Do **not** copy its `package.json`, `tscon
 
 ## Google Sheets (POST /api/questionnaire)
 
-The UI submits to `POST /api/questionnaire`, which appends one row to the **existing** spreadsheet tab `Respuestas de formulario 1`, columns A:X, in the Google Form's order: timestamp, name, surname, email, A1–A10, B1–B10 (answers persisted as `Si`/`No`, matching the historical Form data; the UI still shows "Sí"). No new sheet, columns or tabs are created and existing rows are never modified.
+The UI submits to `POST /api/questionnaire`, which appends one row to the existing `Respuestas de formulario 1` tab using its current header names. Tracking fields now sit between email and the 20 questions, so answer columns are resolved by question headers. The app writes only its own tracking cells in newly linked rows; historical rows are not changed. Answers remain `Si`/`No` (the UI shows “Sí”). See [tracking and cutover](docs/tracking-and-cutover.md).
 
 1. Enable the **Google Sheets API** in the Cloud project that owns the service account.
 2. Share the spreadsheet with `GOOGLE_CLIENT_EMAIL` as **Editor**.

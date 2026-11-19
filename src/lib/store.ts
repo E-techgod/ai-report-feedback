@@ -219,6 +219,34 @@ export function createStore(sql: SqlExecutor) {
       return rows.map((row) => String(row.id));
     },
 
+    /** Cutover only: move a reviewed, never-attempted disabled report into the normal queue. */
+    async requeueDisabled(
+      id: string,
+      since: Date,
+      until: Date,
+      now: Date,
+      maxAgeMs: number,
+    ): Promise<boolean> {
+      const rows = await sql(
+        `update reports set email_status = 'pending', email_next_attempt_at = $4,
+           email_updated_at = $4, tracking_version = tracking_version + 1
+         where id = $1 and email_status = 'disabled' and email_attempts = 0
+           and email_accepted_at is null and email_provider_message_id is null
+           and sheet_row_number is not null
+           and created_at >= $2 and created_at <= $3 and created_at >= $5
+         returning id`,
+        [
+          id,
+          since.toISOString(),
+          until.toISOString(),
+          now.toISOString(),
+          new Date(now.getTime() - maxAgeMs).toISOString(),
+        ],
+      );
+      if (rows.length) await event(id, now, 'requeued', 'reviewed-cutover');
+      return rows.length > 0;
+    },
+
     /** Same person + same answers recently, even under a different client-side submission id. */
     findRecentByFingerprint: (fingerprint: string, since: Date) =>
       one(

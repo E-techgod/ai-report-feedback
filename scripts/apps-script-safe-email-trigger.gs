@@ -1,4 +1,5 @@
 /**
+ * DO NOT INSTALL: this draft creates a live email trigger and can duplicate Resend delivery.
  * DRAFT — NOT INSTALLED. Review before pasting into the spreadsheet's Apps Script project.
  *
  * Wraps the EXISTING enviarCorreosPendientes() (left untouched) in a time-driven trigger that is

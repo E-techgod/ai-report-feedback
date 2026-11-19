@@ -63,6 +63,47 @@ test('sheet row linkage and tracking versions are idempotent and guarded', async
   assert.deepEqual(await store.listUnsynced(10), []);
 });
 
+test('cutover re-queue changes only reviewed disabled reports once', async () => {
+  const store = await freshStore();
+  const record = await seed(store, 'disabled');
+  await store.linkSheetRow(record.id, 27);
+  assert.equal(
+    await store.requeueDisabled(
+      record.id,
+      plus(-60_000),
+      plus(60_000),
+      plus(120_000),
+      47 * 3600_000,
+    ),
+    true,
+  );
+  assert.equal(
+    await store.requeueDisabled(
+      record.id,
+      plus(-60_000),
+      plus(60_000),
+      plus(120_000),
+      47 * 3600_000,
+    ),
+    false,
+  );
+  const queued = await store.getById(record.id);
+  assert.equal(queued.emailStatus, 'pending');
+  assert.equal(queued.emailAttempts, 0);
+  assert.equal(queued.emailAcceptedAt, null);
+  assert.deepEqual(
+    (
+      await store.raw('select event from report_email_events where report_id = $1', [record.id])
+    ).rows.map((r) => r.event),
+    ['requeued'],
+  );
+  const old = await seed(store, 'disabled');
+  assert.equal(
+    await store.requeueDisabled(old.id, plus(-60_000), plus(60_000), plus(120_000), 47 * 3600_000),
+    false,
+  );
+});
+
 test('claimEmail lets exactly one concurrent caller win', async () => {
   const store = await freshStore();
   const { id } = await seed(store);
