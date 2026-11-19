@@ -547,7 +547,7 @@ test('apply with the right project and phrase writes through the CLI with the ex
   assert.equal(await r.done, 0, r.err.join('\n'));
   assert.deepEqual(
     addCalls(ws).map((c) => c.argv),
-    ['GOOGLE_PRIVATE_KEY', 'ANTHROPIC_API_KEY', 'RESEND_WEBHOOK_SECRET'].map((name) => [
+    ['GOOGLE_PRIVATE_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'].map((name) => [
       'env',
       'add',
       name,
@@ -611,7 +611,7 @@ test('rotating a secret through the CLI needs the flag and the rotation phrase',
   const ws = workspace();
   const r = run(ws, [
     '--only',
-    'CRON_SECRET',
+    'REPORT_TOKEN_SECRET',
     '--allow-secret-rotation',
     '--expect-project',
     IDS.projectId,
@@ -624,7 +624,7 @@ test('rotating a secret through the CLI needs the flag and the rotation phrase',
   const ws2 = workspace();
   const r2 = run(ws2, [
     '--only',
-    'CRON_SECRET',
+    'REPORT_TOKEN_SECRET',
     '--allow-secret-rotation',
     '--expect-project',
     IDS.projectId,
@@ -634,18 +634,24 @@ test('rotating a secret through the CLI needs the flag and the rotation phrase',
   assert.equal(await r2.done, 0);
   assert.deepEqual(
     addCalls(ws2).map((c) => c.argv[2]),
-    ['CRON_SECRET'],
+    ['REPORT_TOKEN_SECRET'],
   );
 
   const ws3 = workspace();
-  const r3 = run(ws3, ['--only', 'CRON_SECRET', '--expect-project', IDS.projectId]);
+  const r3 = run(ws3, ['--only', 'REPORT_TOKEN_SECRET', '--expect-project', IDS.projectId]);
   assert.equal(await r3.done, 1);
   assert.match(r3.err.join('\n'), /opt-in/);
   assert.equal(calls(ws3).length, 0);
 });
 
 test('forbidden variables cannot be requested through the CLI', async () => {
-  for (const name of ['REPORT_EMAIL_ENABLED', 'DATABASE_URL', 'GOOGLE_SHEETS_WEBHOOK_URL']) {
+  for (const name of [
+    'REPORT_EMAIL_ENABLED',
+    'DATABASE_URL',
+    'RESEND_API_KEY',
+    'CRON_SECRET',
+    'GOOGLE_SHEETS_WEBHOOK_URL',
+  ]) {
     const ws = workspace();
     const r = run(ws, ['--dry-run', '--only', name]);
     assert.equal(await r.done, 1);
