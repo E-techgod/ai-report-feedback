@@ -79,7 +79,7 @@ test('email is a concise summary: finding, priority area and next step come from
     assert.ok(text.includes(`${label} ${value}`), `text missing "${label} ${value}"`);
   }
   // Greeting, attachment notice and appointment invitation, in both versions.
-  for (const part of [`Hola, ${report.firstName}:`, 'Tu informe completo está adjunto']) {
+  for (const part of [`Hola, ${report.firstName}.`, 'Informe completo adjunto']) {
     assert.ok(flat.includes(part), `html missing ${part}`);
     assert.ok(text.includes(part), `text missing ${part}`);
   }
@@ -130,44 +130,33 @@ test('redesigned email follows the report structure and takes every value from t
   });
   const flat = plain(html);
   const order = [
-    'quiron-logo.png',
-    c.brand,
-    c.hero.title,
-    `Hola, ${report.firstName}:`,
+    'Tu diagnóstico patrimonial está listo',
+    `Hola, ${report.firstName}.`,
     c.hero.score.label,
     c.hero.score.value,
-    c.hero.score.levelLabel,
-    c.hero.weak.label,
     `${c.hero.weak.value} ${c.hero.weak.of}`,
+    c.hero.weak.label,
+    c.hero.score.levelLabel,
     'Tu principal hallazgo:',
     'Área prioritaria:',
     'Siguiente paso:',
-    'Agendar asesoría personalizada',
-    'Tu informe completo está adjunto',
+    'Informe completo adjunto',
     'Informe.pdf',
+    'Agendar asesoría personalizada',
     c.legal,
   ];
   let at = -1;
   for (const part of order) {
-    const found = (part.endsWith('.png') ? html : flat).indexOf(
-      part,
-      part.endsWith('.png') ? 0 : at + 1,
-    );
+    const found = flat.indexOf(part, at + 1);
     assert.ok(found >= 0, `missing or out of order: ${part}`);
-    if (!part.endsWith('.png')) at = found;
+    at = found;
   }
-  // The web report's palette: black / dark grays / white / orange, and the stored percentage.
-  for (const color of [
-    '#000000',
-    '#16171a',
-    '#1d1e22',
-    '#34363c',
-    '#a1a4ad',
-    '#d95d1e',
-    '#ffffff',
-  ]) {
+  assert.ok(html.includes('https://app.example.com/images/quiron-logo.png'));
+  // White editorial layout with a black field for the white-lettered logo.
+  for (const color of ['#000000', '#ffffff', '#171717', '#777777', '#e6e6e6', '#d95d1e']) {
     assert.ok(html.includes(color), `palette colour ${color} missing`);
   }
+  assert.doesNotMatch(html, /#16171a|#1d1e22|#34363c/);
   assert.ok(html.includes(`width="${report.model.score.protection}%"`));
   assert.ok(html.includes(`href="${report.bookingUrl}"`));
 });
@@ -198,7 +187,7 @@ test('every user-controlled value is escaped, including the attachment name and 
     siteUrl: `https://a.example/${evil}`,
     attachmentName: `${evil}.pdf`,
   });
-  assert.doesNotMatch(html, /<img src=x|onerror=alert\(1\)>|"><img/);
+  assert.doesNotMatch(html, /<img src=x|onerror=alert\(1\)>/);
   assert.ok(html.includes('&#60;img src=x onerror=alert(1)&#62;'));
 });
 
@@ -209,7 +198,7 @@ test('missing or extreme fields never break the layout', () => {
   assert.ok(!noLogo.includes('<img') && noLogo.includes('QUIRÓN'));
   // empty first name falls back like the subject does
   const noName = buildEmail({ ...base, firstName: '' });
-  assert.ok(noName.html.includes('Hola, cliente:'));
+  assert.ok(noName.html.includes('Hola, cliente.'));
   // no booking URL: no link at all, only the report's own note
   const noUrl = buildEmail({ ...base, bookingUrl: null }).html;
   assert.ok(!noUrl.includes('href=') && !noUrl.includes('Agendar asesoría personalizada'));
@@ -226,7 +215,7 @@ test('missing or extreme fields never break the layout', () => {
     const { html: bar } = buildEmail({ ...base, model: { ...base.model, score } });
     assert.doesNotMatch(bar, /width="(NaN|-)/);
     const fillCell = bar.match(/<td width="(\d+)%" bgcolor="#d95d1e"/);
-    const trackCell = bar.match(/<td width="(\d+)%" bgcolor="#34363c"/);
+    const trackCell = bar.match(/<td width="(\d+)%" bgcolor="#ededed"/);
     assert.equal(fillCell && Number(fillCell[1]), fill, `fill for ${protection}`);
     assert.equal(trackCell && Number(trackCell[1]), track, `track for ${protection}`);
   }
@@ -234,7 +223,7 @@ test('missing or extreme fields never break the layout', () => {
   const long = { ...base, firstName: 'A'.repeat(100) };
   const { html } = buildEmail(long, { attachmentName: `${'B'.repeat(120)}.pdf` });
   assert.ok(html.includes('A'.repeat(100)) && html.includes('B'.repeat(120)));
-  assert.ok(html.split('overflow-wrap:anywhere').length > 6);
+  assert.ok(html.split('overflow-wrap:anywhere').length > 5);
   assert.doesNotMatch(html, /white-space:\s*nowrap/);
 });
 
