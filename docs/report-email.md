@@ -163,19 +163,107 @@ Impact on the new flow (**blocker for production activation**):
 - Unused code: `mensaje` (column F) and `textoRecomendaciones` are computed but never used.
 
 **Still unknown:** the installed triggers (Apps Script → Triggers). Until they are listed, "no duplicate legacy
-messages" cannot be verified.
+messages" cannot be verified. See the migration plan below.
 
-Proposed migration (each step needs approval):
+The full migration plan is in the next section. Nothing in it has been applied.
 
-1. List the installed triggers and which function each calls.
-2. Add a guard so the legacy sender skips rows created by this app (e.g. a marker the app writes to the sent
-   column, or the legacy script ignoring ids that exist in `reports`). Test on one `PRUEBA` row. This writes to
-   the production Sheet, so it is **not** done in this change.
-3. Run `npm run db:migrate` (done on Neon), set Resend/Vercel variables with `REPORT_EMAIL_ENABLED=false`,
-   deploy, and verify `/api/questionnaire` end to end (report only).
-4. Send one real test submission to an address you control with `REPORT_EMAIL_ENABLED=true` (preview first).
-   Check the inbox, the PDF attachment, `accepted` → `delivered`.
-5. Enable in production. Keep the legacy Forms workflow untouched for Forms submissions.
+## Migration plan: legacy Apps Script → Resend report email
+
+**Status: proposal. Nothing below has been done.** No Sheet, Apps Script, trigger or production variable has been
+changed, `REPORT_EMAIL_ENABLED` is `false`, and no real email has been sent.
+
+### Phase A: audit findings
+
+Read-only look at the production Sheet (tab names, Dashboard header and formulas, column H/I flags, column A
+timestamps; no names or emails were read).
+
+1. **References to `enviarCorreosPendientes()`.** The live copy exists only in the Sheet's Apps Script project,
+   which could not be read from here. In this repo only comments and helpers mention it:
+   - `scripts/apps-script-safe-email-trigger.gs`: a draft that, if installed, adds a 5-minute time-driven trigger.
+     It is the riskiest file for duplicates: delete it or label it "do not install".
+   - `scripts/apps-script-test-one-row.gs`: a reconstruction that can really send and mark "Enviado".
+   - `scripts/google-apps-script.gs`: an unrelated legacy web-app endpoint (`WEB_SHIELD_2026`).
+   - `README.md` and `scripts/test-submission.ts` carry warnings about it.
+2. **Installed triggers: cannot be inspected from here.** Evidence it runs automatically: the Dashboard shows
+   "Enviado" on the same day as the response for the August rows (13/8, 25/8) and for the 18/11 row. A manual run
+   on the same day would look identical. Manual check (Apps Script project):
+   - **Triggers** (clock icon): list every trigger, its function and its event source.
+   - **Executions**: filter on `enviarCorreosPendientes` and read the **Type** column ("Time-driven" or "From
+     spreadsheet" = trigger, "Editor" = manual run).
+   - **Project Settings → Script Properties**, and **Deploy → Manage deployments**.
+3. **The two flows.**
+   - Google Form → `Respuestas de formulario 1` → Dashboard → legacy Gmail. It never touches Neon, so Form
+     respondents can never receive the Resend email.
+   - Web app → `/api/questionnaire` → append row to Sheets → report in Neon → Resend. The Dashboard also picks
+     these rows up, so legacy can email them too.
+4. **How "sent" is stored, and how pending rows are told apart.**
+   - Legacy: Dashboard A–G are open-ended `ARRAYFORMULA`s over the responses tab; H and I are literal values
+     the script writes **by row position**. Nothing links a Dashboard row to anything else.
+   - Resend: `reports.email_status` (9 states) plus the `report_email_events` audit table.
+   - App rows and Form rows are identical in A:X and the Sheet holds no report id; the only link is email plus
+     answers. A content-based guard is therefore impossible without writing to the Sheet.
+   - The app's levels match the Dashboard formula (100 Excelente, 80 Alto, 60 Medio, 40 Bajo, else Muy bajo).
+5. **What the Sheet shows.**
+   - Historical pending: exactly **1** row (response row 3, 9/4/2026, column H empty).
+   - Dashboard rows 14–18 are already marked "Enviado 18/11/2026" although the responses tab only has data through
+     row 13. The next 5 submissions would be silently skipped by legacy. Either deleted test rows were emailed and
+     removed, or someone pre-marked them as a guard. Not determinable from here. It also shows how fragile the
+     positional column H is.
+   - `Respuestas` has empty columns Y:AC.
+6. **PDF and email use the same persisted report.** `generateNarrative` is called only in `createReport()`
+   (`pipeline.ts`). Sending, retrying and the cron read the stored report, and a test proves a failed send never
+   regenerates it.
+   - **Gap:** a report created while email is disabled gets status `disabled`, and no code path re-queues it.
+     Anyone who submits through the web app while both systems are off gets no email at all.
+
+### Phase B: proposal
+
+**Approach:** a kill switch inside the legacy function, not trigger deletion. The function body, the formulas,
+columns H/I and all triggers stay in place. A manual Run does nothing while the switch is off.
+
+1. **Prepare (no production change).** Verify the Resend domain (SPF and DKIM). Set `RESEND_API_KEY`,
+   `EMAIL_FROM` and `RESEND_WEBHOOK_SECRET`, and the Vercel production variables, still with
+   `REPORT_EMAIL_ENABLED=false`. Register the webhook.
+2. **Kill-switch patch (prepared in the repo, applied by hand).** Three lines at the top of
+   `enviarCorreosPendientes()`: if the Script Property `LEGACY_EMAIL_ENABLED` is not `"true"`, log and return.
+   Delivered as a paste-ready file for review. It is not applied by us.
+3. **Remove the dangerous draft** `scripts/apps-script-safe-email-trigger.gs` from the repo, or label it clearly.
+4. **Cutover order: gap plus backfill, not overlap.** Overlap sends customers two emails (visible); a gap can be
+   repaired.
+   1. In a quiet hour, set `LEGACY_EMAIL_ENABLED` to off.
+   2. Right away, set `REPORT_EMAIL_ENABLED=true` in production.
+   3. Run a small, idempotent re-queue script for `disabled` reports created since the cutover. The idempotency
+      key (`report-email/<id>`) still prevents double sends.
+5. **Historical records.** Leave row 3 alone (the kill switch stops it being sent). Leave rows 14–18 alone and
+   keep the positional-fragility note. Old respondents cannot be back-sent: there are no Neon reports for them.
+6. **Dashboard.** No formula changes. New app rows show an empty column H. A Neon-sourced status column is a
+   separate, later task.
+7. **Test a real Resend email without touching production.**
+   - Use a Neon branch (`neon checkout test --create`) and a Vercel preview.
+   - Use a **copy** of the Sheet (a copied spreadsheet does not copy triggers, so legacy cannot fire), or a seeded
+     `PRUEBA` report sent without the Sheet.
+   - Send to an address you control. Check rendering in Gmail, Outlook and Apple Mail.
+   - Check the attached PDF opens and matches the website download.
+   - Check `accepted` → `delivered` through the webhook.
+   - Re-trigger the same send and confirm no second email arrives.
+   - Use `bounced@resend.dev` to confirm a bounce is recorded.
+8. **Rollback.**
+   - New system off: `REPORT_EMAIL_ENABLED=false` and redeploy. This stops all new sends immediately.
+   - Legacy back on: set `LEGACY_EMAIL_ENABLED=true`. **First** mark the rows Resend already emailed as "Enviado"
+     (list them from Neon: `accepted` or `delivered`), or legacy will email them a second time.
+   - If a trigger was ever removed, re-create it from the trigger list recorded in the manual check above.
+
+### Approvals and answers needed before implementation
+
+1. **Is the Google Form still live for new respondents?** If yes, disabling legacy leaves them with no email at
+   all, and the plan changes (they stay on legacy or move to the web app).
+2. The **Triggers and Executions** results from the manual check in Phase A, item 2.
+3. Approval of the kill-switch patch, and agreement that it is applied by hand in Apps Script.
+4. Approval of the gap-plus-backfill cutover, the quiet window and the re-queue script.
+5. Resend ownership: the verified sender domain, who creates the API key and webhook, and the test recipient.
+6. Approval to create a Sheet copy and a Neon branch for testing.
+7. Rows 14–18: pre-marked on purpose, or leftovers from deleted tests?
+8. Approval to set the Vercel production variables (still with `REPORT_EMAIL_ENABLED=false`).
 
 ## Verification matrix
 
