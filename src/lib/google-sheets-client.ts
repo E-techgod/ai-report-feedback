@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
-import { SHEET_COLUMNS, SHEET_TAB, type SheetCell, type SheetsGateway } from './sheets';
+import { columnLetter } from './sheet-schema';
+import { SHEET_TAB, type SheetCell, type SheetsGateway } from './sheets';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const tab = `'${SHEET_TAB}'`;
@@ -36,19 +37,28 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
       return timeZone;
     },
 
-    async readEmails() {
+    async readHeaders() {
       const { data } = await sheets.spreadsheets.values.get(
-        { spreadsheetId, range: `${tab}!D:D` },
+        { spreadsheetId, range: `${tab}!1:1` },
+        options,
+      );
+      return (data.values?.[0] ?? []).map((value) => String(value ?? ''));
+    },
+
+    async readColumn(index) {
+      const letter = columnLetter(index);
+      const { data } = await sheets.spreadsheets.values.get(
+        { spreadsheetId, range: `${tab}!${letter}:${letter}` },
         options,
       );
       return (data.values ?? []).map((row) => String(row[0] ?? ''));
     },
 
-    async readRows(rowNumbers) {
+    async readRows(rowNumbers, width) {
       const { data } = await sheets.spreadsheets.values.batchGet(
         {
           spreadsheetId,
-          ranges: rowNumbers.map((n) => `${tab}!A${n}:X${n}`),
+          ranges: rowNumbers.map((n) => `${tab}!A${n}:${columnLetter(width - 1)}${n}`),
           valueRenderOption: 'UNFORMATTED_VALUE',
           dateTimeRenderOption: 'SERIAL_NUMBER',
         },
@@ -58,11 +68,10 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
     },
 
     async appendRow(row) {
-      if (row.length !== SHEET_COLUMNS) throw new Error('Unexpected row width');
       const { data } = await sheets.spreadsheets.values.append(
         {
           spreadsheetId,
-          range: `${tab}!A:X`,
+          range: `${tab}!A:${columnLetter(row.length - 1)}`,
           valueInputOption: 'USER_ENTERED',
           insertDataOption: 'INSERT_ROWS',
           requestBody: { values: [row] },
@@ -72,6 +81,7 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
       return {
         updatedRows: data.updates?.updatedRows ?? 0,
         updatedCells: data.updates?.updatedCells ?? 0,
+        updatedRange: data.updates?.updatedRange ?? '',
       };
     },
   };

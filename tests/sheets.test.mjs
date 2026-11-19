@@ -1,14 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { questionIds } from '../src/lib/questions.ts';
-import {
-  buildRow,
-  cleanText,
-  escapeCell,
-  saveSubmission,
-  wallClock,
-  SHEET_COLUMNS,
-} from '../src/lib/sheets.ts';
+import { parseSheetSchema } from '../src/lib/sheet-schema.ts';
+import { buildRow, cleanText, escapeCell, saveSubmission, wallClock } from '../src/lib/sheets.ts';
+
+const HEADERS = [
+  'Marca temporal',
+  'Nombre',
+  'Apellido*',
+  'Correo*',
+  'Estado Reporte',
+  'Estado Email',
+  'Estado Descarga PDF',
+  'Estado Descarga CSV',
+  'Fecha Generación',
+  'Fecha Envío',
+  'Fecha Descarga PDF',
+  'Fecha Descarga CSV',
+  'Último Error',
+  'ID Reporte',
+  'Intentos Email',
+  ...Array.from({ length: 10 }, (_, i) => `A) \n${i + 1}.- Pregunta`),
+  ...Array.from({ length: 10 }, (_, i) => `B)\n${i + 1}.- Pregunta`),
+];
+const SCHEMA = parseSheetSchema(HEADERS);
 
 let counter = 0;
 const uuid = () => `00000000-0000-4000-8000-${String(++counter).padStart(12, '0')}`;
@@ -26,9 +41,18 @@ const submission = (over = {}) => ({
 /** In-memory fake of the Google Sheets gateway; `sheet[0]` is the header row. */
 function fakeGateway({
   rows = [],
-  confirm = { updatedRows: 1, updatedCells: SHEET_COLUMNS },
+  confirm = { updatedRows: 1, updatedCells: HEADERS.length },
 } = {}) {
-  const sheet = [['Marca temporal'], ...rows];
+  const expanded = rows.map((row) => {
+    if (row.length !== 24) return row;
+    const result = Array(HEADERS.length).fill('');
+    result.splice(0, 4, ...row.slice(0, 4));
+    questionIds.forEach((id, i) => {
+      result[SCHEMA.questions[id]] = row[4 + i];
+    });
+    return result;
+  });
+  const sheet = [HEADERS, ...expanded];
   const calls = { append: 0 };
   return {
     sheet,
@@ -36,8 +60,11 @@ function fakeGateway({
     async getTimeZone() {
       return 'America/Mexico_City';
     },
-    async readEmails() {
-      return sheet.map((r) => String(r[3] ?? ''));
+    async readHeaders() {
+      return sheet[0];
+    },
+    async readColumn(index) {
+      return sheet.map((r) => String(r[index] ?? ''));
     },
     async readRows(nums) {
       return nums.map((n) => sheet[n - 1]);
@@ -45,24 +72,32 @@ function fakeGateway({
     async appendRow(row) {
       calls.append += 1;
       if (confirm.updatedRows === 1) sheet.push(row);
-      return confirm;
+      return {
+        ...confirm,
+        updatedRange: `'Respuestas de formulario 1'!A${sheet.length}:${'AI'}${sheet.length}`,
+      };
     },
   };
 }
 
-test('row keeps the A:X order and persists answers as Si/No (historical format)', () => {
+test('row follows live headers and persists answers as Si/No', () => {
   const s = submission({ answers: answers((i) => i === 0 || i === 19) });
-  const row = buildRow(s, '2026-11-18 13:06:10');
-  assert.equal(row.length, SHEET_COLUMNS);
+  const row = buildRow(s, '2026-11-18 13:06:10', SCHEMA);
+  assert.equal(row.length, HEADERS.length);
   assert.deepEqual(row.slice(0, 4), ['2026-11-18 13:06:10', 'Ana', 'López', s.email]);
-  assert.equal(row[4], 'Si'); // A1
-  assert.equal(row[5], 'No'); // A2
-  assert.equal(row[23], 'Si'); // B10
-  assert.ok(row.slice(4).every((v) => v === 'Si' || v === 'No'));
+  assert.equal(row[SCHEMA.questions.A1], 'Si');
+  assert.equal(row[SCHEMA.questions.A2], 'No');
+  assert.equal(row[SCHEMA.questions.B10], 'Si');
+  assert.ok(row.slice(4, 15).every((v) => v === ''));
+  assert.ok(row.slice(15).every((v) => v === 'Si' || v === 'No'));
 });
 
 test('email is lower-cased and text is stripped of control characters', () => {
-  const row = buildRow(submission({ email: ' Ana@Example.COM ', firstName: 'A\nna\t' }), 'ts');
+  const row = buildRow(
+    submission({ email: ' Ana@Example.COM ', firstName: 'A\nna\t' }),
+    'ts',
+    SCHEMA,
+  );
   assert.equal(row[3], 'ana@example.com');
   assert.equal(row[1], 'A na');
 });
@@ -182,8 +217,8 @@ test('same email with different answers recently is a new submission', async () 
 
 test('existing historical rows are never modified', async () => {
   const historical = [45000.5, 'Luis', 'Pérez', 'luis@example.com', ...questionIds.map(() => 'Si')];
-  const snapshot = JSON.stringify(historical);
   const g = fakeGateway({ rows: [historical] });
+  const snapshot = JSON.stringify(g.sheet[1]);
   await saveSubmission(g, submission());
   assert.equal(JSON.stringify(g.sheet[1]), snapshot);
   assert.equal(g.sheet.length, 3);
