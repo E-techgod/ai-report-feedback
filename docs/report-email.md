@@ -27,7 +27,9 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 - `src/lib/narrative.ts` – Claude call. Output is forced through a tool schema and re-validated.
 - `src/lib/store.ts` + `db/schema.sql` – Postgres (Neon). Questionnaire responses stay in Sheets only.
 - `src/lib/pipeline.ts` – create report, send email (atomic claim), recovery sweep.
-- `src/lib/email.ts` – Resend client, branded HTML, webhook signature check.
+- `src/lib/email.ts` – Resend client, subject/plain text, webhook signature check.
+- `src/lib/email-html.ts` – the HTML email (table layout, inline CSS, the web report's palette).
+  Presentation only: every value comes from `buildReportContent()` / the stored report.
 - `src/lib/pdf/ReportPdf.tsx` – server-side PDF (`@react-pdf/renderer`).
   **Serverless packaging:** pdfkit loads its built-in fonts (Helvetica, Helvetica-Bold) with
   `createRequire('#standard-fonts/*')`, which Next's file tracer cannot see. `next.config.ts` lists
