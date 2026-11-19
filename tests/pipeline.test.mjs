@@ -9,7 +9,9 @@ import {
   RecipientLimitError,
   SubmissionConflictError,
   maskEmail,
+  parseEmailAllowlist,
   processDueEmails,
+  recipientAllowed,
   publicEmailStatus,
 } from '../src/lib/pipeline.ts';
 import { fallbackNarrative } from '../src/lib/report.ts';
@@ -373,4 +375,79 @@ test('score, level, finding, action and PDF attachment all come from the SAME st
   }
   assert.ok(mail.text.includes(mail.attachments[0].filename), 'email names the attached file');
   assert.ok(mail.html.includes(`href="${stored.bookingUrl}"`));
+});
+
+// ------------------------------------------------------------------ test recipient allowlist
+
+test('parseEmailAllowlist: unset/empty means no restriction; anything else fails closed', () => {
+  assert.equal(parseEmailAllowlist(undefined), null);
+  assert.equal(parseEmailAllowlist(''), null);
+  assert.deepEqual(parseEmailAllowlist(' A@Example.com, b@example.com;a@example.com\n'), [
+    'a@example.com',
+    'b@example.com',
+  ]);
+  // a set-but-unusable value restricts to NOBODY instead of opening sending to everyone
+  for (const raw of [' ', ',', 'not-an-address', 'a@b', '@example.com', 'a b@example.com'])
+    assert.deepEqual(parseEmailAllowlist(raw), [], JSON.stringify(raw));
+  assert.equal(recipientAllowed({ emailAllowlist: null }, 'anyone@example.com'), true);
+  assert.equal(recipientAllowed({}, 'anyone@example.com'), true);
+  assert.equal(recipientAllowed({ emailAllowlist: [] }, 'anyone@example.com'), false);
+  assert.equal(recipientAllowed({ emailAllowlist: ['a@example.com'] }, ' A@EXAMPLE.com '), true);
+  assert.equal(recipientAllowed({ emailAllowlist: ['a@example.com'] }, 'b@example.com'), false);
+});
+
+test('allowlist: a listed recipient is emailed exactly as before', async () => {
+  const h = harness({ emailAllowlist: ['ana.perez@example.com'] });
+  const { store, deps } = await h.build();
+  const { record } = await createReport(deps, submission());
+  assert.equal(record.emailStatus, 'pending');
+  assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'accepted');
+  assert.equal(h.sent.length, 1);
+  assert.equal((await store.getById(record.id)).emailStatus, 'accepted');
+});
+
+test('allowlist: any other recipient gets a normal report but is stored disabled and never emailed', async () => {
+  const h = harness({ emailAllowlist: ['someone.else@example.com'] });
+  const { store, deps } = await h.build();
+  const { record } = await createReport(deps, submission());
+  assert.equal(record.emailStatus, 'disabled');
+  assert.equal(record.report.narrativeSource, 'ai', 'the report itself is unaffected');
+  assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'not-claimed');
+  assert.equal(h.sent.length, 0);
+  assert.equal((await store.getById(record.id)).emailAttempts, 0);
+});
+
+test('allowlist: an empty (fail-closed) list emails nobody', async () => {
+  const h = harness({ emailAllowlist: [] });
+  const { deps } = await h.build();
+  const { record } = await createReport(deps, submission());
+  assert.equal(record.emailStatus, 'disabled');
+  assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'not-claimed');
+  assert.equal(h.sent.length, 0);
+});
+
+test('allowlist: a report created before the gate was set is refused at send time, consuming no attempt', async () => {
+  const open = harness();
+  const { store, deps } = await open.build();
+  const { record } = await createReport(deps, submission());
+  assert.equal(record.emailStatus, 'pending');
+  // the gate is switched on afterwards (same store): the pending report must not go out
+  const gated = { ...deps, config: { ...deps.config, emailAllowlist: ['other@example.com'] } };
+  assert.equal((await deliverReportEmail(gated, record.id)).outcome, 'not-claimed');
+  assert.equal(open.sent.length, 0);
+  const after = await store.getById(record.id);
+  assert.equal(after.emailAttempts, 0);
+  assert.equal(after.emailStatus, 'pending');
+  // the cron sweep goes through the same gate
+  const swept = await processDueEmails(gated, { budgetMs: 5_000 });
+  assert.equal(swept.accepted, 0);
+  assert.equal(open.sent.length, 0);
+});
+
+test('allowlist: without the setting nothing changes', async () => {
+  const h = harness();
+  const { deps } = await h.build();
+  assert.equal(deps.config.emailAllowlist, undefined);
+  const { record } = await createReport(deps, submission({ email: 'anyone@example.com' }));
+  assert.equal(record.emailStatus, 'pending');
 });

@@ -3,7 +3,7 @@ import { getBookingUrl } from './booking';
 import { createReportStore } from './db';
 import { mailerFromEnv } from './email';
 import { generateNarrative } from './narrative';
-import { DEFAULT_CONFIG, type PipelineDeps } from './pipeline';
+import { DEFAULT_CONFIG, parseEmailAllowlist, type PipelineDeps } from './pipeline';
 import { renderReportPdf } from './pdf/ReportPdf';
 import { createGoogleSheetsGateway } from './google-sheets-client';
 import { syncReportTracking } from './sheet-tracking';
@@ -28,6 +28,8 @@ export function getPipelineDeps(): PipelineDeps | null {
       bookingUrl: getBookingUrl(process.env.NEXT_PUBLIC_BOOKING_URL),
       // Master switch: nothing is emailed until this is explicitly "true".
       emailEnabled: process.env.REPORT_EMAIL_ENABLED === 'true',
+      // Optional test gate: when set, only these addresses are ever emailed.
+      emailAllowlist: parseEmailAllowlist(process.env.REPORT_EMAIL_ALLOWLIST),
       siteUrl: process.env.APP_URL || null,
     },
   };

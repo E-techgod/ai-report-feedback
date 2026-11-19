@@ -10,6 +10,7 @@ export function harness({
   mailerBehavior,
   emailEnabled = true,
   withMailer = true,
+  emailAllowlist,
 } = {}) {
   const clock = { t: T0 };
   const sent = [];
@@ -52,6 +53,7 @@ export function harness({
           ...DEFAULT_CONFIG,
           bookingUrl: 'https://example.com/cita',
           emailEnabled,
+          ...(emailAllowlist === undefined ? {} : { emailAllowlist }),
           siteUrl: null,
         },
       };

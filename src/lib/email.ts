@@ -147,6 +147,35 @@ ${button}
 
 const RESEND_URL = 'https://api.resend.com/emails';
 const SEND_TIMEOUT_MS = 20_000;
+const ERROR_BODY_TIMEOUT_MS = 2_000;
+
+/**
+ * The code stored for a failed send. A permanent 4xx adds Resend's machine-readable error `name`
+ * (for example `validation_error`), the one field that tells an unverified sender domain from a bad
+ * key. Never Resend's message: it can contain the recipient address. Retryable failures keep the
+ * bare status because AMBIGUOUS_ERRORS matches 'resend-http-409' exactly.
+ */
+async function failureCode(response: Response, retryable: boolean): Promise<string> {
+  const base = `resend-http-${response.status}`;
+  if (retryable) return base;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const body = await Promise.race([
+      response.json() as Promise<{ name?: unknown }>,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(reject, ERROR_BODY_TIMEOUT_MS);
+      }),
+    ]);
+    const name = body?.name;
+    return typeof name === 'string' && /^[a-z][a-z0-9_]{0,39}$/.test(name)
+      ? `${base}:${name}`
+      : base;
+  } catch {
+    return base;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export type MailerConfig = {
   apiKey: string;
@@ -195,7 +224,7 @@ export function createResendMailer(config: MailerConfig): Mailer {
         // succeed on retry (bad address, unverified domain, invalid key...).
         const retryable =
           response.status === 409 || response.status === 429 || response.status >= 500;
-        throw new MailError(`resend-http-${response.status}`, retryable);
+        throw new MailError(await failureCode(response, retryable), retryable);
       }
       const data = (await response.json().catch(() => ({}))) as { id?: unknown };
       return { messageId: typeof data.id === 'string' ? data.id : null };
