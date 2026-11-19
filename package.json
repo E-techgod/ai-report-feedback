@@ -11,7 +11,8 @@
     "test": "node --import tsx --test tests/*.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "db:migrate": "node --env-file=.env --import tsx scripts/db-migrate.ts"
+    "db:migrate": "node --env-file=.env --import tsx scripts/db-migrate.ts",
+    "env:sync:production": "node --import tsx scripts/env-sync-production.ts"
   },
   "dependencies": {
     "@neon/config": "^1.14.4",
