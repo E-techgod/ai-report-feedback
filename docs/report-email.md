@@ -32,19 +32,19 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 
 ## Guarantees and how they are enforced
 
-| Requirement                    | Mechanism                                                                                                                                                                                        |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Single canonical report        | `FinalReport` is built once, deep-frozen, hashed, stored; web/PDF/email only read it.                                                                                                            |
-| AI failure is explicit         | `narrativeSource: "ai" \| "template"` + `aiFailureReason`. Template reports say so in the report ("Cómo se elaboró este reporte").                                                               |
-| No duplicate emails            | `UPDATE … WHERE status IN (pending, failed) AND due` is the only way to start a send (one winner), plus Resend `Idempotency-Key: report-email/<id>` for lost responses.                          |
-| Provider acceptance ≠ delivery | `accepted` is set on Resend's 2xx; `delivered`/`bounced` only by signed webhook. The UI says "Informe enviado" on `accepted`/`delivered`, "No se pudo entregar" on `bounced`.                    |
-| Submission never lost          | Sheets row is written first. If report generation fails the browser retries with the same submission id and gets the same report.                                                                |
-| Bounded retries                | max 5 attempts, backoff 1/5/15/60 min, never after 12 h; stuck `sending` rows are reclaimed after a 5 min lease.                                                                                 |
-| Recipient integrity            | Email goes to the address stored with the submission; no endpoint accepts a recipient. No client "resend" endpoint exists.                                                                       |
-| Abuse limits                   | 10 submissions/IP/min, 120 report reads and 20 PDFs/IP/min, 5 new reports per address per day (all shared across instances via Postgres). Report/PDF need an HMAC access token sent in a header. |
-| No secrets/content in logs     | Logs carry report ids, attempt numbers and short error codes only.                                                                                                                               |
-| Consent                        | `privacyAccepted` must be `true` in the request schema or nothing is written or sent.                                                                                                            |
-| Master switch                  | Reports are created with email status `disabled` unless `REPORT_EMAIL_ENABLED=true` and Resend is configured. Disabled reports are never emailed later.                                          |
+| Requirement                    | Mechanism                                                                                                                                                                                                                                                                    |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Single canonical report        | `FinalReport` is built once, deep-frozen, hashed, stored; web/PDF/email only read it.                                                                                                                                                                                        |
+| AI failure is explicit         | `narrativeSource: "ai" \| "template"` + `aiFailureReason`. Template reports say so in the report ("Cómo se elaboró este reporte").                                                                                                                                           |
+| No duplicate emails            | `UPDATE … WHERE status IN (pending, failed) AND due` is the only way to start a send (one winner), plus Resend `Idempotency-Key: report-email/<id>` for lost responses.                                                                                                      |
+| Provider acceptance ≠ delivery | `accepted` is set on Resend's 2xx; `delivered`/`bounced` only by signed webhook. The UI says "Informe enviado" on `accepted`/`delivered`, "No se pudo entregar" on `bounced`.                                                                                                |
+| Submission never lost          | Sheets row is written first. If report generation fails the browser retries with the same submission id and gets the same report.                                                                                                                                            |
+| Bounded retries                | max 5 attempts; backoff 1/5/15/60 min are _minimum_ delays; reports are retried for up to **47 h**, then finalized as failed; stuck `sending` rows are reclaimed after a 5 min lease. With the once-daily cron, retries happen at the daily sweep (see "Recovery schedule"). |
+| Recipient integrity            | Email goes to the address stored with the submission; no endpoint accepts a recipient. No client "resend" endpoint exists.                                                                                                                                                   |
+| Abuse limits                   | 10 submissions/IP/min, 120 report reads and 20 PDFs/IP/min, 5 new reports per address per day (all shared across instances via Postgres). Report/PDF need an HMAC access token sent in a header.                                                                             |
+| No secrets/content in logs     | Logs carry report ids, attempt numbers and short error codes only.                                                                                                                                                                                                           |
+| Consent                        | `privacyAccepted` must be `true` in the request schema or nothing is written or sent.                                                                                                                                                                                        |
+| Master switch                  | Reports are created with email status `disabled` unless `REPORT_EMAIL_ENABLED=true` and Resend is configured. Disabled reports are never emailed later.                                                                                                                      |
 
 ## Required configuration (see `.env.example`)
 
@@ -62,28 +62,66 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 ## Recovery schedule (Vercel Hobby: once a day)
 
 Vercel Hobby only accepts cron jobs that run at most once per day, so `vercel.json` schedules
-`/api/cron/retry-emails` at `0 12 * * *` (12:00 UTC, 06:00 in Mexico City). The endpoint path and its
-`CRON_SECRET` bearer check are unchanged, and so is the retry/idempotency logic.
+`/api/cron/retry-emails` at `0 12 * * *` (12:00 UTC, 06:00 in Mexico City; Hobby may start the run
+anywhere inside that hour). The endpoint path and its `CRON_SECRET` bearer check are unchanged.
+
+### How a report is recovered
 
 - **Normal case is unaffected.** The first send happens immediately, right after the report is stored
   (`after()` in `POST /api/questionnaire`). It does not wait for the cron.
 - **That first send is the only prompt attempt.** If it fails (provider error, instance died) the next
   attempt is the next daily sweep. The 1/5/15/60 min backoff values are _minimum_ delays, so the real
-  delay before a retry can be up to ~24 h.
-- **Retry window gap.** The sweep only retries reports younger than 12 h (`maxAgeMs`, kept below the
-  provider's 24 h idempotency window). A report is therefore only recoverable if the 12:00 UTC sweep
-  falls within 12 h of its creation, i.e. reports created between 00:00 and 12:00 UTC (18:00–06:00
-  Mexico City). A first-send failure for a report created between 12:00 and 24:00 UTC
-  (06:00–18:00 Mexico City) is **not** retried automatically and the email is not sent.
-- **Status shown to the user.** A failed attempt that will not be retried is still stored as `failed`,
-  which the page shows as "Enviando…" (retry pending), not as an error. It becomes an error only for
-  permanent failures or after the attempt budget is spent.
-- `processDueEmails` is safe to run by hand or concurrently (atomic claims), so an operator can call
-  the endpoint with the `CRON_SECRET` bearer to recover stuck sends.
+  delay before a retry is up to ~24 h.
+- **Retry window: 47 h** (`maxAgeMs`). With one sweep per day, any report is reached by at least one
+  sweep: the next 12:00 UTC run is always less than 24 h after it was created. Two sweeps fit inside
+  47 h for reports created just before a run (e.g. 11:59 UTC) and one for reports created just after
+  (e.g. 12:01 UTC).
+- **Skipped or very late runs.** If a run is skipped, a report created just after the previous run is
+  reached only by the run two days later (≈48 h), which is past the window. It is then finalized as
+  failed and **not sent**. A run that is merely late (still inside 47 h) recovers it normally.
+- **Backlog.** A sweep first finalizes expired reports, then processes _everything_ that is due in
+  batches of 25 until its 45 s budget is spent (the function limit is 60 s). On Hobby that is an
+  estimated 25–30 emails per run (about 1.5–2 s each for the PDF render plus the provider call; not measured); a large outage backlog could outlast the
+  window. See "Architectural notes".
 
-Options if this gap matters (none applied here; the retry logic was deliberately left unchanged):
-raise `maxAgeMs` to just under 24 h so the daily sweep covers every report; move to a Vercel plan that
-allows frequent crons and restore a short schedule; or trigger the endpoint from an external scheduler.
+### What the customer sees
+
+| Stored state                                                          | Shown as                                                                               |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `pending` / `sending` (active attempt)                                | "Enviando…"                                                                            |
+| `failed` with a later attempt still possible                          | "No pudimos enviar el correo todavía. Lo reintentaremos automáticamente…" (`retrying`) |
+| `accepted` / `delivered`                                              | "Informe enviado"                                                                      |
+| `bounced`                                                             | "No se pudo entregar el correo…"                                                       |
+| `failed_final`: attempts used up, older than 47 h, or unsafe to retry | "No se pudo enviar el correo. Descarga tu informe en PDF aquí."                        |
+
+The terminal state is also **derived when the report is read**, so a report that is out of attempts or
+older than 47 h shows the failure immediately, even before the next sweep writes `failed_final`.
+Stored reasons (`email_last_error`): `expired`, `attempts-exhausted`,
+`unknown-outcome-after-idempotency-window`, or the last provider error code.
+
+### Duplicate protection beyond 24 h
+
+Resend remembers an idempotency key for 24 h, but retries now span up to 47 h. If an earlier attempt
+may have reached the provider without us learning the result — a timeout, a network error, an
+in-flight conflict (HTTP 409), or a send whose acceptance was never recorded (crash) — a retry made
+more than **23 h** after the first attempt would no longer be de-duplicated and could produce a second
+email. In that case the retry is **refused** and the report is finalized as failed
+(`unknown-outcome-after-idempotency-window`), even though the customer may in fact have received the
+email. A definitive HTTP rejection (e.g. 503, 429, 4xx) means the provider did not accept the message,
+so those are retried for the full 47 h. The check uses the existing `report_email_events` audit table:
+no schema change.
+
+### Architectural notes
+
+- **No new services or migrations were introduced.** Everything uses the existing tables and cron.
+- **Daily cadence is a ceiling on resilience.** With Hobby, a first-send failure costs up to a day, a
+  missed run can cost the email, and throughput is an estimated 25–30 emails per run. If volume or reliability
+  matters, the clean fixes are a plan that allows frequent crons (restore a short schedule; the logic
+  already supports it) or an external scheduler calling the endpoint with the bearer secret.
+- **Why 47 h and not 48 h:** a retry window equal to the cron period would let the second sweep land
+  at ≈48 h, right on the boundary; 47 h makes the cutoff unambiguous.
+- The sweep endpoint is safe to call by hand or concurrently (atomic claims), so an operator can
+  recover stuck sends with the `CRON_SECRET` bearer.
 
 ## Legacy Apps Script (not touched)
 
