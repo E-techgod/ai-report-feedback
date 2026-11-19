@@ -31,6 +31,7 @@ const {
   SYNC_OPT_IN,
   assertEnvFileProtected,
   buildPlan,
+  buildNewVariablePlan,
   classifyVariable,
   createVercelRunner,
   customEnvironmentsArgs,
@@ -41,6 +42,7 @@ const {
   redact,
   resolveProjectIdentity,
   runSync,
+  isNewVariableCandidate,
   secretForms,
   selectNames,
 } = lib.runSync ? lib : lib.default;
@@ -78,6 +80,34 @@ test('default sync excludes the opt-in secrets; the allowlist never contains for
   assert.deepEqual(selectNames(undefined), [...SYNC_DEFAULT]);
   assert.ok(!selectNames(undefined).includes('REPORT_TOKEN_SECRET'));
   assert.ok(!selectNames(undefined).includes('CRON_SECRET'));
+});
+
+test('new local names are proposals only; protected and existing names are excluded', () => {
+  const local = {
+    NEW_SERVICE_TOKEN: 'new-service-secret-value',
+    EMPTY_NEW: '',
+    DATABASE_URL_ANALYTICS: 'postgres://local-only',
+    REPORT_EMAIL_ALLOWLIST: 'test@example.com',
+    VERCEL_TOKEN: 'credential-value',
+    CRON_SECRET: 'cron-secret-value',
+    ALREADY_REMOTE: 'local-value',
+  };
+  const state = {
+    ok: true,
+    records: [{ key: 'ALREADY_REMOTE' }],
+    customEnvironments: 0,
+  };
+  assert.equal(isNewVariableCandidate('NEW_SERVICE_TOKEN'), true);
+  assert.equal(isNewVariableCandidate('DATABASE_URL_ANALYTICS'), false);
+  assert.deepEqual(buildNewVariablePlan(local, state), [
+    {
+      name: 'NEW_SERVICE_TOKEN',
+      operation: 'propose',
+      note: 'new local name; create only, never overwrite',
+    },
+  ]);
+  assert.equal(buildNewVariablePlan(local, state, ['NEW_SERVICE_TOKEN'])[0].operation, 'create');
+  assert.equal(buildNewVariablePlan(local, state, ['ALREADY_REMOTE'])[0].operation, 'blocked');
 });
 
 test('Preview classification updates only a lone Preview record', () => {
@@ -354,6 +384,72 @@ test('dry run prints the project and names, never values, and only reads', async
   assert.deepEqual(verbs(ws), ['env ls', `api ${customEnvironmentsArgs(IDS.projectId)[1]}`]); // reads only: listing + custom environments
   assert.deepEqual(calls(ws)[0].argv, ['env', 'ls', '--format', 'json']);
   assert.ok(!output.includes('REPORT_TOKEN_SECRET'), 'opt-in secrets are not even planned');
+});
+
+test('dry run proposes new local variables without sending their values or creating them', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const h = harness(ws, { dryRun: true });
+  const result = await runSync(h.options);
+  const output = h.lines.join('\n');
+  assert.deepEqual(result.problems, []);
+  assert.match(output, /propose\s+NEW_SERVICE_TOKEN/);
+  assert.match(output, /--approve-new NEW_SERVICE_TOKEN/);
+  assert.doesNotMatch(output, /new-service-secret-value/);
+  assert.doesNotMatch(output, /REPORT_EMAIL_ENABLED|DATABASE_URL|CRON_SECRET/);
+  assert.equal(addCalls(ws).length, 0);
+});
+
+test('explicit approval creates only the new name, without force or default updates', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const h = harness(ws, { approveNew: ['NEW_SERVICE_TOKEN'] });
+  await runSync(h.options);
+  assert.deepEqual(
+    addCalls(ws).map((call) => call.argv),
+    [['env', 'add', 'NEW_SERVICE_TOKEN', 'production']],
+  );
+  assert.equal(addCalls(ws)[0].stdin, 'new-service-secret-value');
+  assert.equal(h.asked.length, 1);
+  assert.doesNotMatch(h.lines.join('\n'), /new-service-secret-value/);
+});
+
+test('approval cannot overwrite an existing or protected variable', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const existing = harness(
+    ws,
+    { approveNew: ['NEW_SERVICE_TOKEN'] },
+    { FAKE_EXISTING: 'NEW_SERVICE_TOKEN' },
+  );
+  await assert.rejects(runSync(existing.options), /Refusing to apply/);
+  assert.equal(existing.asked.length, 0);
+  assert.equal(addCalls(ws).length, 0);
+
+  for (const name of ['DATABASE_URL', 'REPORT_EMAIL_ENABLED', 'CRON_SECRET', 'VERCEL_TOKEN']) {
+    const invalid = harness(ws, { approveNew: [name] });
+    await assert.rejects(runSync(invalid.options), /not an eligible nonempty local variable/);
+  }
+  assert.equal(addCalls(ws).length, 0);
+});
+
+test('a new variable appearing remotely after confirmation is never overwritten', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const h = harness(
+    ws,
+    { approveNew: ['NEW_SERVICE_TOKEN'] },
+    {
+      FAKE_LS_SEQ: JSON.stringify([[], [{ key: 'NEW_SERVICE_TOKEN', target: ['production'] }]]),
+    },
+  );
+  await assert.rejects(runSync(h.options), /changed after the plan was shown/);
+  assert.equal(addCalls(ws).length, 0);
+});
+
+test('--only keeps the run focused and cannot be mixed with new-name approval', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const focused = harness(ws, { dryRun: true, only: ['ANTHROPIC_API_KEY'] });
+  await runSync(focused.options);
+  assert.doesNotMatch(focused.lines.join('\n'), /NEW_SERVICE_TOKEN/);
+  const mixed = harness(ws, { only: ['ANTHROPIC_API_KEY'], approveNew: ['NEW_SERVICE_TOKEN'] });
+  await assert.rejects(runSync(mixed.options), /cannot be combined/);
 });
 
 test('dry run reports blocked variables and unverifiable state as problems without failing', async () => {

@@ -11,6 +11,7 @@
  *   --expect-project <id>     REQUIRED to apply; must equal the linked projectId (see --dry-run)
  *   --expect-org <id>         optional extra check against the linked orgId
  *   --only A,B                subset of the allowlist
+ *   --approve-new A,B         approve previously proposed local names for creation only
  *   --allow-secret-rotation   needed (with --only) to touch REPORT_TOKEN_SECRET / CRON_SECRET
  *   --offline                 dry run without calling the Vercel CLI
  *   --env-file <path>         source file (default .env; must be git-ignored)
@@ -29,6 +30,7 @@ export type Args = {
   allowRotation: boolean;
   envFile: string;
   only?: string[];
+  approveNew?: string[];
   expectProject?: string;
   expectOrg?: string;
 };
@@ -36,7 +38,7 @@ export type Args = {
 export const USAGE =
   'Usage: npm run env:check | npm run env:sync:preview | npm run env:sync:production -- ' +
   '[--target preview|production] [--dry-run] [--expect-project <projectId>] [--expect-org <orgId>] ' +
-  '[--only A,B] [--allow-secret-rotation] [--offline] [--env-file <path>]';
+  '[--only A,B] [--approve-new A,B] [--allow-secret-rotation] [--offline] [--env-file <path>]';
 
 export function parseArgs(argv: string[]): Args {
   const args: Args = {
@@ -67,6 +69,7 @@ export function parseArgs(argv: string[]): Args {
     else if (
       flag === '--env-file' ||
       flag === '--only' ||
+      flag === '--approve-new' ||
       flag === '--expect-project' ||
       flag === '--expect-org'
     ) {
@@ -75,11 +78,15 @@ export function parseArgs(argv: string[]): Args {
       if (flag === '--env-file') args.envFile = value;
       else if (flag === '--expect-project') args.expectProject = value;
       else if (flag === '--expect-org') args.expectOrg = value;
-      else
-        args.only = value
+      else {
+        const selected = value
           .split(',')
           .map((name) => name.trim())
           .filter(Boolean);
+        if (selected.length === 0) throw new Error(`${flag} needs at least one name`);
+        if (flag === '--only') args.only = selected;
+        else args.approveNew = selected;
+      }
     } else throw new Error(`Unknown option: ${flag}\n${USAGE}`);
   }
   if (args.check && targetSeen) throw new Error('--check compares both targets; omit --target');
@@ -139,6 +146,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       target,
       offline: args.offline,
       only: args.only,
+      approveNew: args.approveNew,
       allowRotation: args.allowRotation,
       expectProject: args.expectProject,
       expectOrg: args.expectOrg,

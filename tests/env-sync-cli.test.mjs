@@ -91,6 +91,10 @@ test('parseArgs reads every flag', () => {
       expectOrg: 'team_1',
     },
   );
+  assert.deepEqual(parseArgs(['--approve-new', 'NEW_SERVICE_TOKEN,ANOTHER_KEY']).approveNew, [
+    'NEW_SERVICE_TOKEN',
+    'ANOTHER_KEY',
+  ]);
 });
 
 test('check reads Preview and Production without writing or asking for confirmation', async () => {
@@ -160,10 +164,36 @@ test('parseArgs rejects unknown options and missing values, including a flag use
     /only be specified once/,
   );
   assert.throws(() => parseArgs(['--check', '--target', 'preview']), /compares both targets/);
-  for (const flag of ['--env-file', '--only', '--expect-project', '--expect-org']) {
+  for (const flag of [
+    '--env-file',
+    '--only',
+    '--approve-new',
+    '--expect-project',
+    '--expect-org',
+  ]) {
     assert.throws(() => parseArgs([flag]), /needs a value/, flag);
     assert.throws(() => parseArgs([flag, '--dry-run']), /needs a value/, flag);
   }
+});
+
+test('Preview new-name approval uses Preview and still requires the typed phrase', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const r = run(ws, [
+    '--target',
+    'preview',
+    '--approve-new',
+    'NEW_SERVICE_TOKEN',
+    '--expect-project',
+    IDS.projectId,
+  ]);
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 0, r.err.join('\n'));
+  assert.deepEqual(
+    addCalls(ws).map((call) => call.argv),
+    [['env', 'add', 'NEW_SERVICE_TOKEN', 'preview']],
+  );
+  assert.doesNotMatch(r.out.join('\n') + r.term.printed(), /new-service-secret-value/);
 });
 
 // ---------------------------------------------------------------------------- the confirmation
