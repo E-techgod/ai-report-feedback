@@ -21,6 +21,10 @@ headers exist. It does not add columns to the live Sheet. Confirm the intended n
 before expecting counters to appear there. `Estado Descarga CSV` and its date remain untouched
 because the app has no CSV download route.
 
+The Dashboard score formula now references `P:AI`, so it follows the shifted questions. The live
+legacy Apps Script source still needs review: a helper in this repo reads answers from old `E:X`
+positions and must not be treated as safe after the insertion.
+
 The app reads headers for every append and tracking sync. Missing or duplicate required headers
 stop the write. It appends a full row with blank tracking cells, then links the confirmed row number
 to the report in Neon. A sync checks the row's email, all 20 answers via the persisted fingerprint,

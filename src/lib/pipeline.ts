@@ -133,7 +133,7 @@ export async function createReport(
     bookingUrl: config.bookingUrl,
     now: clock(deps),
   });
-  return store.insertReport({
+  const saved = await store.insertReport({
     report,
     email,
     fingerprint,
@@ -141,6 +141,9 @@ export async function createReport(
     sheetRowNumber,
     now: clock(deps),
   });
+  if (!saved.created && sheetRowNumber && !saved.record.sheetRowNumber)
+    return { record: await store.linkSheetRow(saved.record.id, sheetRowNumber), created: false };
+  return saved;
 }
 
 async function syncSafely(deps: PipelineDeps, reportId: string) {
@@ -173,7 +176,6 @@ export async function deliverReportEmail(
     maxAgeMs: config.maxAgeMs,
   });
   if (!claimed) return { outcome: 'not-claimed' };
-  await syncSafely(deps, reportId);
 
   // Retrying past the provider's idempotency window after an unknown outcome could send a second
   // copy. In that case we stop and report a terminal failure instead of guessing.
@@ -255,7 +257,6 @@ export async function processDueEmails(
   const started = Date.now();
   if (!config.emailEnabled) return { expired: 0, due: 0, accepted: 0, failed: 0, skipped: 0 };
   const expired = await deps.store.expireStale(clock(deps), opts);
-  for (const id of expired) await syncSafely(deps, id);
   const summary = { expired: expired.length, due: 0, accepted: 0, failed: 0, skipped: 0 };
   const seen = new Set<string>();
   while (Date.now() - started < budgetMs) {

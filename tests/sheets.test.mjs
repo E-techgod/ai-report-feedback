@@ -92,6 +92,18 @@ test('row follows live headers and persists answers as Si/No', () => {
   assert.ok(row.slice(15).every((v) => v === 'Si' || v === 'No'));
 });
 
+test('row follows reordered email and question headers without changing answer meaning', () => {
+  const headers = [...HEADERS];
+  [headers[3], headers[20]] = [headers[20], headers[3]];
+  const schema = parseSheetSchema(headers);
+  const s = submission({ answers: answers((i) => i === 5) });
+  const row = buildRow(s, 'ts', schema);
+  assert.equal(row[schema.email], s.email);
+  assert.equal(row[schema.questions.A6], 'Si');
+  assert.equal(row[schema.questions.A1], 'No');
+  assert.equal(row[SCHEMA.tracking.reportId], '');
+});
+
 test('email is lower-cased and text is stripped of control characters', () => {
   const row = buildRow(
     submission({ email: ' Ana@Example.COM ', firstName: 'A\nna\t' }),
