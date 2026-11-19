@@ -146,6 +146,12 @@ test('success is NOT reported when Google does not confirm the write', async () 
   await assert.rejects(saveSubmission(g, submission()), /did not confirm/);
 });
 
+test('read-back confirms a full row even if updatedCells omits blank placeholders', async () => {
+  const g = fakeGateway({ confirm: { updatedRows: 1, updatedCells: 24 } });
+  assert.equal(await saveSubmission(g, submission()), 'created');
+  assert.equal(g.sheet.length, 2);
+});
+
 test('failed writes are not remembered, so a retry can succeed', async () => {
   const s = submission();
   const bad = fakeGateway({ confirm: { updatedRows: 0, updatedCells: 0 } });

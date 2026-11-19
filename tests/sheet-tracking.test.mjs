@@ -32,6 +32,7 @@ async function setup({ totals = false, emailStatus = 'disabled' } = {}) {
   const report = sampleReport();
   const row = Array(headers.length).fill('');
   row[schema.email] = 'a@b.com';
+  row[schema.tracking.reportId] = `submission:${report.submissionId}`;
   for (const id of questionIds) row[schema.questions[id]] = SAMPLE_YES.includes(id) ? 'Si' : 'No';
   const sheet = [headers, row];
   const calls = [];
@@ -44,6 +45,9 @@ async function setup({ totals = false, emailStatus = 'disabled' } = {}) {
     },
     async readRows(nums) {
       return nums.map((n) => sheet[n - 1]);
+    },
+    async readColumn(index) {
+      return sheet.map((row) => String(row[index] ?? ''));
     },
     async writeCells(rowNumber, cells) {
       calls.push(cells);
@@ -63,22 +67,21 @@ async function setup({ totals = false, emailStatus = 'disabled' } = {}) {
   return { store, gateway, sheet, calls, schema, record };
 }
 
-test('syncs the persisted report to only named tracking fields; repeated sync keeps counters stable', async () => {
+test('syncs the persisted report to only named tracking fields and leaves undefined counters alone', async () => {
   const ctx = await setup({ totals: true });
   ctx.sheet[1][ctx.schema.tracking.reportId] = `submission:${ctx.record.submissionId}`;
   assert.equal(await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id), true);
   const row = ctx.sheet[1];
   assert.equal(row[ctx.schema.tracking.reportId], ctx.record.id);
   assert.equal(row[ctx.schema.tracking.emailStatus], 'Desactivado');
-  assert.equal(row[ctx.schema.tracking.totalReports], 1);
-  assert.equal(row[ctx.schema.tracking.totalEmails], 0);
+  assert.deepEqual(row.slice(-2), ['', '']);
   assert.equal(row[ctx.schema.questions.A1], 'Si');
   assert.equal(row[ctx.schema.tracking.csvStatus], '');
   assert.equal(ctx.calls.length, 1);
   assert.equal(await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id), false);
 });
 
-test('later PDF and email state updates project without duplicating counts', async () => {
+test('later PDF and email state updates project without writing undefined counters', async () => {
   const ctx = await setup({ totals: true, emailStatus: 'pending' });
   await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
   await ctx.store.markPdfDownloaded(ctx.record.id, AT);
@@ -87,7 +90,7 @@ test('later PDF and email state updates project without duplicating counts', asy
   await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
   assert.equal(ctx.sheet[1][ctx.schema.tracking.pdfStatus], 'Descarga iniciada');
   assert.equal(ctx.sheet[1][ctx.schema.tracking.pdfDownloadedAt], '2026-11-18 09:00:00');
-  assert.equal(ctx.sheet[1][ctx.schema.tracking.totalReports], 1);
+  assert.deepEqual(ctx.sheet[1].slice(-2), ['', '']);
   await ctx.store.claimEmail(ctx.record.id, AT, {
     maxAttempts: 5,
     leaseMs: 60_000,
@@ -96,12 +99,12 @@ test('later PDF and email state updates project without duplicating counts', asy
   await ctx.store.markAccepted(ctx.record.id, 'resend_1', AT);
   await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
   assert.equal(ctx.sheet[1][ctx.schema.tracking.emailStatus], 'Aceptado');
-  assert.equal(ctx.sheet[1][ctx.schema.tracking.totalEmails], 1);
+  assert.deepEqual(ctx.sheet[1].slice(-2), ['', '']);
   assert.equal(ctx.sheet[1][ctx.schema.tracking.emailAttempts], 1);
   await ctx.store.applyProviderEvent('resend_1', 'delivered', AT);
   await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id);
   assert.equal(ctx.sheet[1][ctx.schema.tracking.emailStatus], 'Entregado');
-  assert.equal(ctx.sheet[1][ctx.schema.tracking.totalEmails], 1);
+  assert.deepEqual(ctx.sheet[1].slice(-2), ['', '']);
 });
 
 test('refuses to overwrite a moved row or a different report id', async () => {
@@ -113,10 +116,44 @@ test('refuses to overwrite a moved row or a different report id', async () => {
   );
   ctx.sheet[1][ctx.schema.email] = 'a@b.com';
   ctx.sheet[1][ctx.schema.tracking.reportId] = crypto.randomUUID();
+  await ctx.store.raw('update reports set sheet_sync_next_attempt_at = null where id = $1', [
+    ctx.record.id,
+  ]);
   await assert.rejects(
     () => syncReportTracking(ctx.store, ctx.gateway, ctx.record.id),
-    /different report/,
+    /identity not found/,
   );
+  assert.equal(ctx.calls.length, 0);
+});
+
+test('finds a moved report by ID and never overwrites a reused row number', async () => {
+  const ctx = await setup();
+  ctx.sheet[1][ctx.schema.tracking.reportId] = ctx.record.id;
+  const reused = Array(ctx.schema.headers.length).fill('');
+  reused[ctx.schema.tracking.reportId] = crypto.randomUUID();
+  ctx.sheet.splice(1, 0, reused);
+  assert.equal(await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id), true);
+  assert.equal((await ctx.store.getById(ctx.record.id)).sheetRowNumber, 3);
+  assert.equal(ctx.sheet[1][ctx.schema.tracking.reportStatus], '');
+  assert.equal(ctx.sheet[2][ctx.schema.tracking.reportStatus], 'Generado');
+});
+
+test('recovers a missing row-number hint from the persisted report ID', async () => {
+  const ctx = await setup();
+  ctx.sheet[1][ctx.schema.tracking.reportId] = ctx.record.id;
+  await ctx.store.raw('update reports set sheet_row_number = null where id = $1', [ctx.record.id]);
+  assert.equal(await syncReportTracking(ctx.store, ctx.gateway, ctx.record.id), true);
+  assert.equal((await ctx.store.getById(ctx.record.id)).sheetRowNumber, 2);
+});
+
+test('an exhausted sync budget defers the report and frees the next cron slot', async () => {
+  const ctx = await setup();
+  await assert.rejects(
+    () => syncReportTracking(ctx.store, ctx.gateway, ctx.record.id, 0),
+    /budget exhausted/,
+  );
+  assert.equal((await ctx.store.getById(ctx.record.id)).sheetSyncFailures, 1);
+  assert.deepEqual(await ctx.store.listUnsynced(1), []);
   assert.equal(ctx.calls.length, 0);
 });
 

@@ -29,10 +29,13 @@ export type ReportRecord = {
   report: FinalReport;
   createdAt: Date;
   sheetRowNumber: number | null;
+  sheetTrackingExpected: boolean;
   pdfDownloadedAt: Date | null;
   trackingVersion: number;
   sheetSyncedVersion: number;
   sheetSyncLeaseUntil: Date | null;
+  sheetSyncFailures: number;
+  sheetSyncNextAttemptAt: Date | null;
   emailStatus: EmailStatus;
   emailAttempts: number;
   emailLastAttemptAt: Date | null;
@@ -75,10 +78,13 @@ function toRecord(row: Record<string, unknown>): ReportRecord {
     report,
     createdAt: d(row.created_at)!,
     sheetRowNumber: row.sheet_row_number == null ? null : Number(row.sheet_row_number),
+    sheetTrackingExpected: row.sheet_tracking_expected === true,
     pdfDownloadedAt: d(row.pdf_downloaded_at),
     trackingVersion: Number(row.tracking_version),
     sheetSyncedVersion: Number(row.sheet_synced_version),
     sheetSyncLeaseUntil: d(row.sheet_sync_lease_until),
+    sheetSyncFailures: Number(row.sheet_sync_failures),
+    sheetSyncNextAttemptAt: d(row.sheet_sync_next_attempt_at),
     emailStatus: row.email_status as EmailStatus,
     emailAttempts: Number(row.email_attempts),
     emailLastAttemptAt: d(row.email_last_attempt_at),
@@ -124,8 +130,8 @@ export function createStore(sql: SqlExecutor) {
       const inserted = await sql(
         `insert into reports (id, submission_id, fingerprint, email, report, content_hash,
            narrative_source, ai_failure_reason, created_at, email_status, email_updated_at,
-           sheet_row_number)
-         values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $9, $11)
+           sheet_row_number, sheet_tracking_expected)
+         values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $9, $11, true)
          on conflict (submission_id) do nothing
          returning *`,
         [
@@ -161,15 +167,33 @@ export function createStore(sql: SqlExecutor) {
     /** Link a pre-existing report to its verified response row, without changing its content. */
     async linkSheetRow(id: string, rowNumber: number): Promise<ReportRecord> {
       const record = await one(
-        `update reports set sheet_row_number = $2, tracking_version = tracking_version + 1
+        `update reports set sheet_row_number = $2, sheet_tracking_expected = true,
+           tracking_version = tracking_version + 1
          where id = $1 and sheet_row_number is null returning *`,
         [id, rowNumber],
       );
       if (record) return record;
       const existing = await one('select * from reports where id = $1', [id]);
-      if (!existing || existing.sheetRowNumber !== rowNumber)
-        throw new Error('Report linked to a different spreadsheet row');
+      if (!existing) throw new Error('Report not found');
+      // A row number may have moved since a previous request. The identity scan in
+      // syncReportTracking verifies and repairs this hint; it must not fail report creation.
       return existing;
+    },
+
+    /** Called only after the report marker and answer fingerprint verify at the new location. */
+    async relinkSheetRow(
+      id: string,
+      previousRow: number | null,
+      rowNumber: number,
+    ): Promise<ReportRecord> {
+      const record = await one(
+        `update reports set sheet_row_number = $3, sheet_tracking_expected = true,
+           tracking_version = tracking_version + 1
+         where id = $1 and sheet_row_number is not distinct from $2 returning *`,
+        [id, previousRow, rowNumber],
+      );
+      if (!record) throw new Error('Spreadsheet row link changed concurrently');
+      return record;
     },
 
     async markPdfDownloaded(id: string, at: Date): Promise<void> {
@@ -182,7 +206,8 @@ export function createStore(sql: SqlExecutor) {
 
     async markSheetSynced(id: string, version: number): Promise<boolean> {
       const rows = await sql(
-        `update reports set sheet_synced_version = $2
+        `update reports set sheet_synced_version = $2,
+           sheet_sync_failures = 0, sheet_sync_next_attempt_at = null
          where id = $1 and tracking_version = $2 and sheet_synced_version < $2
          returning id`,
         [id, version],
@@ -194,9 +219,10 @@ export function createStore(sql: SqlExecutor) {
     claimSheetSync: (id: string, now: Date, leaseMs = 90_000) =>
       one(
         `update reports set sheet_sync_lease_until = $2
-         where id = $1 and sheet_row_number is not null
+         where id = $1 and (sheet_tracking_expected or sheet_row_number is not null)
            and tracking_version > sheet_synced_version
            and (sheet_sync_lease_until is null or sheet_sync_lease_until < $3)
+           and (sheet_sync_next_attempt_at is null or sheet_sync_next_attempt_at <= $3)
          returning *`,
         [id, new Date(now.getTime() + leaseMs).toISOString(), now.toISOString()],
       ),
@@ -208,12 +234,24 @@ export function createStore(sql: SqlExecutor) {
       );
     },
 
+    async deferSheetSync(id: string, leaseUntil: Date, now: Date): Promise<void> {
+      await sql(
+        `update reports set sheet_sync_failures = sheet_sync_failures + 1,
+           sheet_sync_next_attempt_at = $3::timestamptz +
+             (least(86400, 60 * power(2, least(sheet_sync_failures, 10))) * interval '1 second')
+         where id = $1 and sheet_sync_lease_until = $2`,
+        [id, leaseUntil.toISOString(), now.toISOString()],
+      );
+    },
+
     async listUnsynced(limit: number): Promise<string[]> {
       const rows = await sql(
-        `select id from reports where sheet_row_number is not null
+        `select id from reports where (sheet_tracking_expected or sheet_row_number is not null)
            and tracking_version > sheet_synced_version
            and (sheet_sync_lease_until is null or sheet_sync_lease_until < now())
-         order by created_at asc limit $1`,
+           and (sheet_sync_next_attempt_at is null or sheet_sync_next_attempt_at <= now())
+         order by (sheet_sync_failures > 0) asc,
+           coalesce(sheet_sync_next_attempt_at, created_at) asc, created_at asc limit $1`,
         [limit],
       );
       return rows.map((row) => String(row.id));

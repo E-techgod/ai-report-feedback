@@ -23,38 +23,41 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
   });
   const sheets = google.sheets({ version: 'v4', auth });
   const options = { timeout: REQUEST_TIMEOUT_MS };
+  const timed = (timeoutMs?: number) => ({
+    timeout: Math.min(REQUEST_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs ?? REQUEST_TIMEOUT_MS))),
+  });
   let timeZone: string | undefined;
 
   return {
-    async getTimeZone() {
+    async getTimeZone(timeoutMs) {
       if (timeZone) return timeZone;
       const { data } = await sheets.spreadsheets.get(
         { spreadsheetId, fields: 'properties.timeZone' },
-        options,
+        timed(timeoutMs),
       );
       timeZone = data.properties?.timeZone ?? undefined;
       if (!timeZone) throw new Error('Spreadsheet time zone unavailable');
       return timeZone;
     },
 
-    async readHeaders() {
+    async readHeaders(timeoutMs) {
       const { data } = await sheets.spreadsheets.values.get(
         { spreadsheetId, range: `${tab}!1:1` },
-        options,
+        timed(timeoutMs),
       );
       return (data.values?.[0] ?? []).map((value) => String(value ?? ''));
     },
 
-    async readColumn(index) {
+    async readColumn(index, timeoutMs) {
       const letter = columnLetter(index);
       const { data } = await sheets.spreadsheets.values.get(
         { spreadsheetId, range: `${tab}!${letter}:${letter}` },
-        options,
+        timed(timeoutMs),
       );
       return (data.values ?? []).map((row) => String(row[0] ?? ''));
     },
 
-    async readRows(rowNumbers, width) {
+    async readRows(rowNumbers, width, timeoutMs) {
       const { data } = await sheets.spreadsheets.values.batchGet(
         {
           spreadsheetId,
@@ -62,7 +65,7 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
           valueRenderOption: 'UNFORMATTED_VALUE',
           dateTimeRenderOption: 'SERIAL_NUMBER',
         },
-        options,
+        timed(timeoutMs),
       );
       return (data.valueRanges ?? []).map((range) => (range.values?.[0] ?? []) as SheetCell[]);
     },
@@ -85,7 +88,7 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
       };
     },
 
-    async writeCells(rowNumber, cells) {
+    async writeCells(rowNumber, cells, timeoutMs) {
       const { data } = await sheets.spreadsheets.values.batchUpdate(
         {
           spreadsheetId,
@@ -97,9 +100,22 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
             })),
           },
         },
-        options,
+        timed(timeoutMs),
       );
       return data.totalUpdatedCells ?? 0;
+    },
+
+    async readDashboardEmailState(rowNumber) {
+      const { data } = await sheets.spreadsheets.values.get(
+        {
+          spreadsheetId,
+          range: `'Dashboard'!B${rowNumber}:H${rowNumber}`,
+          valueRenderOption: 'UNFORMATTED_VALUE',
+        },
+        options,
+      );
+      const row = data.values?.[0] ?? [];
+      return { email: String(row[0] ?? ''), status: String(row[6] ?? '') };
     },
   };
 }

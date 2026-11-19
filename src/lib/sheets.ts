@@ -20,12 +20,12 @@ export type SheetCell = string | number;
 
 export interface SheetsGateway {
   /** IANA time zone of the spreadsheet (so new timestamps match Form-generated ones). */
-  getTimeZone(): Promise<string>;
-  readHeaders(): Promise<string[]>;
+  getTimeZone(timeoutMs?: number): Promise<string>;
+  readHeaders(timeoutMs?: number): Promise<string[]>;
   /** Values of the named email column, index 0 = row 1. Read-only. */
-  readColumn(index: number): Promise<string[]>;
+  readColumn(index: number, timeoutMs?: number): Promise<string[]>;
   /** Full rows through the last header; dates as serial numbers. Read-only. */
-  readRows(rowNumbers: number[], width: number): Promise<SheetCell[][]>;
+  readRows(rowNumbers: number[], width: number, timeoutMs?: number): Promise<SheetCell[][]>;
   /** Appends one full row and returns Google's updated range. */
   appendRow(
     row: string[],
@@ -34,7 +34,10 @@ export interface SheetsGateway {
   writeCells(
     rowNumber: number,
     cells: Array<{ index: number; value: string | number }>,
+    timeoutMs?: number,
   ): Promise<number>;
+  /** Dashboard B/H for the matching response row; used only by dry-run cutover review. */
+  readDashboardEmailState?(rowNumber: number): Promise<{ email: string; status: string }>;
 }
 
 export type SubmitStatus = 'created' | 'duplicate';
@@ -175,9 +178,12 @@ async function writeOnce(
     throw new Error('Required report tracking headers are missing');
   const markers = await gateway.readColumn(schema.tracking.reportId);
   const marker = `submission:${submission.id}`;
-  const markedRow = markers.findIndex((value, index) => index > 0 && value === marker);
-  if (markedRow >= 0) {
-    const rowNumber = markedRow + 1;
+  const markedRows = markers.flatMap((value, index) =>
+    index > 0 && value === marker ? [index + 1] : [],
+  );
+  if (markedRows.length > 1) throw new Error('Duplicate spreadsheet submission marker');
+  if (markedRows.length === 1) {
+    const rowNumber = markedRows[0];
     const row = (await gateway.readRows([rowNumber], schema.headers.length))[0];
     const matchingEmail =
       normalizeEmail(String(row?.[schema.email] ?? '')) === normalizeEmail(submission.email);
@@ -195,13 +201,27 @@ async function writeOnce(
   const existingRow = await hasRecentDuplicate(gateway, schema, submission, serial);
   if (existingRow) return { status: 'duplicate', rowNumber: existingRow };
 
-  const result = await gateway.appendRow(buildRow(submission, text, schema));
-  const range = result.updatedRange.match(/![A-Z]+(\d+):[A-Z]+\d+$/i);
-  // Success is only reported once Google confirms a complete row and its location.
-  if (result.updatedRows !== 1 || result.updatedCells !== schema.headers.length || !range) {
+  await gateway.appendRow(buildRow(submission, text, schema));
+  // Google's updatedCells counts updated cells, not a promise that every empty tracking
+  // placeholder was stored. Read back the unique marker and meaningful fields instead.
+  const after = await gateway.readColumn(schema.tracking.reportId);
+  const matches = after.flatMap((value, index) =>
+    index > 0 && value === marker ? [index + 1] : [],
+  );
+  if (matches.length !== 1) throw new Error('Google Sheets did not confirm the write');
+  const rowNumber = matches[0];
+  const row = (await gateway.readRows([rowNumber], schema.headers.length))[0];
+  if (
+    !row ||
+    normalizeEmail(String(row[schema.email] ?? '')) !== normalizeEmail(submission.email) ||
+    questionIds.some(
+      (id) =>
+        foldAnswer(row[schema.questions[id]]) !==
+        foldAnswer(normalizeAnswer(submission.answers[id])),
+    )
+  )
     throw new Error('Google Sheets did not confirm the write');
-  }
-  return { status: 'created', rowNumber: Number(range[1]) };
+  return { status: 'created', rowNumber };
 }
 
 /**

@@ -13,10 +13,13 @@ create table if not exists reports (
   ai_failure_reason          text,
   created_at                 timestamptz not null,
   sheet_row_number           int,
+  sheet_tracking_expected    boolean not null default false,
   pdf_downloaded_at          timestamptz,
   tracking_version           bigint not null default 1,
   sheet_synced_version       bigint not null default 0,
   sheet_sync_lease_until     timestamptz,
+  sheet_sync_failures        int not null default 0,
+  sheet_sync_next_attempt_at timestamptz,
 
   email_status               text not null check (email_status in
                                ('disabled', 'pending', 'sending', 'accepted', 'delivered',
@@ -34,12 +37,19 @@ create table if not exists reports (
 
 -- Safe for existing installations. Historical reports have no linked Sheet row until reviewed.
 alter table reports add column if not exists sheet_row_number int;
+alter table reports add column if not exists sheet_tracking_expected boolean not null default false;
 alter table reports add column if not exists pdf_downloaded_at timestamptz;
 alter table reports add column if not exists tracking_version bigint not null default 1;
 alter table reports add column if not exists sheet_synced_version bigint not null default 0;
 alter table reports add column if not exists sheet_sync_lease_until timestamptz;
-create unique index if not exists reports_sheet_row_idx
-  on reports (sheet_row_number) where sheet_row_number is not null;
+alter table reports add column if not exists sheet_sync_failures int not null default 0;
+alter table reports add column if not exists sheet_sync_next_attempt_at timestamptz;
+-- Row numbers are hints. Sorting/inserting rows can reuse a number for a different report.
+drop index if exists reports_sheet_row_idx;
+create index if not exists reports_sheet_sync_due_idx
+  on reports (sheet_sync_next_attempt_at, created_at)
+  where (sheet_tracking_expected or sheet_row_number is not null)
+    and tracking_version > sheet_synced_version;
 
 create index if not exists reports_fingerprint_idx on reports (fingerprint, created_at desc);
 create index if not exists reports_email_due_idx on reports (email_status, email_next_attempt_at);
