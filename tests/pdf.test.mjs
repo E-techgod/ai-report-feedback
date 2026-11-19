@@ -37,11 +37,11 @@ for (const [name, opts] of Object.entries(variants)) {
   });
 }
 
-test('PDF stays short and never claims AI for a template report', async () => {
-  const { text, pages } = await pdfText(sampleReport({ source: 'template' }));
-  assert.ok(pages >= 1 && pages <= 6);
-  assert.match(text, /noestuvodisponible/);
-  assert.doesNotMatch(text, /15%redacciónconia/);
+test('PDF stays short for AI-written and template reports', async () => {
+  for (const source of ['ai', 'template']) {
+    const { pages } = await pdfText(sampleReport({ source }));
+    assert.ok(pages >= 1 && pages <= 6, `${source}: ${pages} pages`);
+  }
 });
 
 test('booking URL is identical in the web content, the email and the PDF link', async () => {

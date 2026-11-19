@@ -787,31 +787,6 @@
   font-size: 11px;
   color: var(--muted);
 }
-.transparency {
-  margin-top: 24px;
-  border: 1px solid var(--line);
-  background: #1d1e22;
-  border-radius: 12px;
-  padding: 18px 20px;
-}
-.paper .transparency h3 {
-  font-size: 13px;
-}
-.paper .transparency p {
-  font-size: 12px;
-  margin-bottom: 0;
-}
-.transparency .mixBar {
-  margin: 12px 0;
-}
-.legendInline {
-  display: flex;
-  gap: 8px 18px;
-  flex-wrap: wrap;
-  font-size: 11px;
-  color: var(--muted);
-  margin-bottom: 10px;
-}
 .paper .legal {
   font-size: 10px;
   color: var(--muted);
@@ -939,8 +914,7 @@
   .priority,
   .aiBox,
   .contentPanel,
-  .scoreCard,
-  .transparency {
+  .scoreCard {
     break-inside: avoid;
   }
   .aiHead,
