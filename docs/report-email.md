@@ -8,7 +8,7 @@ single stored object, so they can never disagree.
 ```
 Browser ──POST /api/questionnaire──▶ validate (consent required) + IP rate limit
                                       │
-                                      ├─ 1. append row to Google Sheets A:X   (unchanged mapping)
+                                      ├─ 1. append header-mapped row to Google Sheets
                                       ├─ 2. createReport():  rules engine + Claude (tool-use, zod-validated,
                                       │      1 bounded retry) → FinalReport → frozen → stored in Postgres
                                       │      (AI failed? stored as narrativeSource="template" and labelled so)
@@ -113,7 +113,8 @@ no schema change.
 
 ### Architectural notes
 
-- **No new services or migrations were introduced.** Everything uses the existing tables and cron.
+- **No new services were introduced.** PR #7 adds idempotent report/Sheet tracking columns and a
+  shared append lease in `db/schema.sql`; migrate the database before deploying that branch.
 - **Daily cadence is a ceiling on resilience.** With Hobby, a first-send failure costs up to a day, a
   missed run can cost the email, and throughput is an estimated 25–30 emails per run. If volume or reliability
   matters, the clean fixes are a plan that allows frequent crons (restore a short schedule; the logic
@@ -123,7 +124,12 @@ no schema change.
 - The sweep endpoint is safe to call by hand or concurrently (atomic claims), so an operator can
   recover stuck sends with the `CRON_SECRET` bearer.
 
-## Legacy Apps Script (not touched)
+## Legacy Apps Script (not activated)
+
+The prepared guard, header-based answer reader, read-only cutover checks, and current Sheet audit
+are in [tracking-and-cutover.md](tracking-and-cutover.md). The steps below describe the original
+plan and require reconciliation with the installed legacy source before activation. No production
+trigger or Script Property was changed by this branch.
 
 `enviarCorreosPendientes()` has **not** been reviewed: its source has not been provided, and
 `scripts/apps-script-test-one-row.gs` is only a reconstruction. Nothing in this change installs,
@@ -137,7 +143,7 @@ Facts that matter for the migration:
   written by this app. That would already be happening with the current production flow, so check
   _Apps Script → Triggers_ before anything else.
 
-Proposed migration (each step needs approval):
+Original migration outline (each step needs approval; use the updated cutover gates above):
 
 1. Provide the real `enviarCorreosPendientes()` and the list of installed triggers.
 2. Add a guard so the legacy sender skips rows created by this app (e.g. a marker the app writes, or

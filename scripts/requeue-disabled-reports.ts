@@ -11,7 +11,11 @@
  */
 import { readFileSync } from 'node:fs';
 import { createReportStore } from '../src/lib/db';
+import { createGoogleSheetsGateway } from '../src/lib/google-sheets-client';
 import { DEFAULT_CONFIG } from '../src/lib/pipeline';
+import { parseSheetSchema } from '../src/lib/sheet-schema';
+import { findVerifiedReportRow } from '../src/lib/sheet-tracking';
+import { normalizeEmail } from '../src/lib/sheets';
 
 function option(name: string): string {
   const index = process.argv.indexOf(`--${name}`);
@@ -32,7 +36,6 @@ export function eligibleForCutover(
     emailAttempts: number;
     emailAcceptedAt: Date | null;
     emailProviderMessageId: string | null;
-    sheetRowNumber: number | null;
     createdAt: Date;
   },
   since: Date,
@@ -43,13 +46,20 @@ export function eligibleForCutover(
     record.createdAt < since ||
     record.createdAt > until ||
     record.createdAt < new Date(now.getTime() - DEFAULT_CONFIG.maxAgeMs) ||
-    !record.sheetRowNumber ||
     record.emailAttempts !== 0 ||
     record.emailAcceptedAt ||
     record.emailProviderMessageId
   ) return 'reject';
   if (record.emailStatus === 'pending') return 'already-queued';
   return record.emailStatus === 'disabled' ? 'eligible' : 'reject';
+}
+
+/** Empty Dashboard H and a matching Dashboard B are required before re-queue. */
+export function dashboardReady(
+  row: { email: string; status: string },
+  expectedEmail: string,
+): boolean {
+  return normalizeEmail(row.email) === normalizeEmail(expectedEmail) && row.status.trim() === '';
 }
 
 async function main() {
@@ -70,12 +80,25 @@ async function main() {
   )) throw new Error('Apply requires email enabled and both legacy safety confirmations');
   const store = createReportStore();
   if (!store) throw new Error('DATABASE_URL is required');
+  const sheet = createGoogleSheetsGateway();
+  if (!sheet?.readDashboardEmailState) throw new Error('Read-only Dashboard audit is unavailable');
+  const schema = parseSheetSchema(await sheet.readHeaders());
   const candidates = await Promise.all(ids.map(async (id) => ({
     id, record: await store.getById(id),
   })));
-  const statuses = candidates.map(({ id, record }) => ({
-    id,
-    state: record ? eligibleForCutover(record, since, until, now) : 'reject',
+  const statuses = await Promise.all(candidates.map(async ({ id, record }) => {
+    let state = record ? eligibleForCutover(record, since, until, now) : 'reject';
+    let rowNumber: number | null = null;
+    if (record && state !== 'reject') {
+      try {
+        rowNumber = await findVerifiedReportRow(sheet, schema, record);
+        const dashboard = await sheet.readDashboardEmailState!(rowNumber);
+        if (!dashboardReady(dashboard, record.email)) state = 'reject';
+      } catch {
+        state = 'reject';
+      }
+    }
+    return { id, state, rowNumber, linkMissing: record?.sheetRowNumber == null };
   }));
   for (const { id, state } of statuses) console.log(`${id} ${state}`);
   if (statuses.some(({ state }) => state === 'reject'))
@@ -85,8 +108,9 @@ async function main() {
     return;
   }
   let queued = 0;
-  for (const { id, state } of statuses) {
+  for (const { id, state, rowNumber, linkMissing } of statuses) {
     if (state === 'already-queued') continue;
+    if (linkMissing && rowNumber) await store.linkSheetRow(id, rowNumber);
     if (await store.requeueDisabled(id, since, until, now, DEFAULT_CONFIG.maxAgeMs)) queued += 1;
   }
   console.log(`Re-queued ${queued} reviewed reports. No email was sent by this script.`);

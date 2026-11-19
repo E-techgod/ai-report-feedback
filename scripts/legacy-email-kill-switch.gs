@@ -1,10 +1,11 @@
 /*
- * PASTE THESE THREE LINES immediately after the opening brace of the existing
- * enviarCorreosPendientes() function in the live Apps Script project.
- * Do not replace the function, run it here, or install a new trigger.
+ * Add this file to the EXISTING Apps Script project, then paste the guard line
+ * below immediately after the opening brace of enviarCorreosPendientes().
+ * Do not install a new trigger for this helper.
  * Default is OFF until the Script Property is explicitly "true".
+ *
+ * if (!legacyEmailEnabled_()) return;
  */
-if (PropertiesService.getScriptProperties().getProperty('LEGACY_EMAIL_ENABLED') !== 'true') {
-  console.log('Legacy report email is disabled');
-  return;
+function legacyEmailEnabled_() {
+  return PropertiesService.getScriptProperties().getProperty('LEGACY_EMAIL_ENABLED') === 'true';
 }

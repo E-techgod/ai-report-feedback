@@ -15,15 +15,20 @@ The spreadsheet `Check up "Descubre si estás Protegido ABRIL 2026 (Respuestas)`
 | Report/email tracking | `Estado Reporte`, `Estado Email`, `Estado Descarga PDF`, `Estado Descarga CSV`, `Fecha Generación`, `Fecha Envío`, `Fecha Descarga PDF`, `Fecha Descarga CSV`, `Último Error`, `ID Reporte`, `Intentos Email` |
 | Questionnaire         | Ten `A)` headers followed by ten `B)` headers; the first question is now column P                                                                                                                             |
 
-`Total Reportes` and `Total Emails` were **not** present in that header row. The code writes those
-as idempotent per-report values (1 after creation; 1 after provider acceptance) only when the
-headers exist. It does not add columns to the live Sheet. Confirm the intended names and placement
-before expecting counters to appear there. `Estado Descarga CSV` and its date remain untouched
-because the app has no CSV download route.
+`Total Reportes` and `Total Emails` were **not** present in that header row. Their definitions are
+unknown, so the app does not write them even if those headers are added later. Define their scope,
+formula, and ownership before implementing counters. The app does not add columns to the live Sheet.
+`Estado Descarga CSV` and its date remain untouched because the app has no CSV download route.
 
-The Dashboard score formula now references `P:AI`, so it follows the shifted questions. The live
-legacy Apps Script source still needs review: a helper in this repo reads answers from old `E:X`
-positions and must not be treated as safe after the insertion.
+The Dashboard score formula now references `P:AI`, so it follows the shifted questions. **Deployment
+risk:** current `main` (commit `b9a99c5`) still appends exactly 24 values into `A:X`, with answers
+starting at `E`. Against the observed live 35-column Sheet, that places answer values in report/email
+tracking fields `E:O`, only partially fills the real questions `P:AI`, and reads the wrong cells for
+duplicate detection. This is a code and schema mismatch, not proof of a particular production
+deployment or of affected rows. Audit the deployed commit and response rows before any release;
+do not repair historical rows by positional guesswork. The reconstructed one-row legacy test helper
+now resolves question headers, but the **installed** `enviarCorreosPendientes()` source and triggers
+remain unavailable and must be audited separately.
 
 The app reads headers for every append and tracking sync. Missing or duplicate required headers
 stop the write. It appends a full row with `Estado Reporte=Pendiente` and a temporary
@@ -34,13 +39,23 @@ and any existing `ID Reporte` before writing tracking cells. It never rewrites a
 source of truth; web report, PDF download, and email attachment all read the same hashed, stored
 `FinalReport`. The Sheet is a projection of status, not a second report store.
 
+Google's `updatedCells` response counts cells updated; a row containing empty tracking placeholders
+does not make equality with the header width a reliable success condition. The app confirms the
+append by reading back its unique submission marker, email, and all answers. If Google wrote a row
+but its response failed, a retry finds the marker instead of appending again.
+
 Before append, a 90-second Neon lease keyed by the answer fingerprint lets only one serverless
 request write the row. A concurrent request gets a retry response; after the lease is released it
 finds the original row. This closes the cross-instance gap left by a process-local dedupe map.
 
-Tracking updates use a per-report database lease and a version. Failed projections remain unsynced
-and the daily cron retries up to 25 rows within a 12-second budget. Each Sheet counter is assigned
-from persisted state, never incremented. `Fecha Envío` means Resend accepted the message, while
+Tracking updates resolve the unique `ID Reporte` value (or the initial `submission:<id>` marker),
+verify email and all answers, and then refresh the row-number hint in Neon if the row moved. A reused
+number cannot identify a different report. The database does not require row numbers to be unique.
+Updates use a per-report lease and version. Failed projections receive exponential retry backoff,
+and never-failed reports are scheduled before retries, so stale records do not repeatedly occupy the
+first cron batch. The daily cron retries up to 25 due rows within a 12-second budget. The initial
+Sheet projection runs after the HTTP response with an eight-second request budget.
+`Fecha Envío` means Resend accepted the message, while
 `Estado Email=Entregado` requires its signed webhook. `Descarga iniciada` means the PDF was rendered
 for an authorized HTTP response; the server cannot prove the browser saved the file.
 
@@ -49,39 +64,55 @@ for an authorized HTTP response; the server cannot prove the browser saved the f
 **Nothing here has been applied to Apps Script, Neon production, Google Sheets, Resend, or Vercel.**
 `REPORT_EMAIL_ENABLED=false` remains in `.env.example`; no customer email was sent.
 
-1. Review the installed Apps Script triggers and executions, and determine whether the Google Form
-   still accepts submissions. Form-only respondents have no Neon report; turning off legacy email
-   without a replacement would leave them without mail. Record the existing Dashboard sent flags,
-   including pre-marked rows 14–18 described in PR #6.
-2. After human approval, paste the three lines in
-   `scripts/legacy-email-kill-switch.gs` immediately inside the existing
-   `enviarCorreosPendientes()` function. It is default-off unless the Script Property
-   `LEGACY_EMAIL_ENABLED` is exactly `true`. Do not install
+1. Audit the deployed production commit before accepting more app submissions. `main`'s old `A:X`
+   writer cannot match the live shifted Sheet. Confirm whether production currently runs that code;
+   if it does, stop or reroute the app's submission traffic through an approved process until the
+   header-mapped writer is deployed. Inspect recent rows for misalignment without altering them.
+2. On a **copy** of the response Sheet and an isolated Neon branch, verify the Sheets API
+   `updatedCells` response for a row with blank tracking fields. Confirm append placement,
+   Dashboard formulas, status projection, PDF parity, duplicate retries, and existing nonempty cells.
+   Relax only checks that the copy proves invalid; never relax the report ID/email/answer guard.
+   This test was not performed here and is a production release gate.
+3. Review installed Apps Script triggers and executions and determine whether the Google Form still
+   accepts submissions. Form-only respondents have no Neon report; a global legacy shutdown would
+   leave them without mail. Record Dashboard sent flags, including pre-marked rows 14–18 described
+   in PR #6. If Forms remains active, keep its legacy mail path and add a tested exclusion for app
+   rows before enabling Resend. The global kill sequence below applies only once Form-only delivery
+   has a replacement or the Form is retired.
+4. After human approval, add `scripts/legacy-email-kill-switch.gs` to the installed Apps Script
+   project and paste `if (!legacyEmailEnabled_()) return;` at the start of the existing
+   `enviarCorreosPendientes()`. Set `LEGACY_EMAIL_ENABLED=true` **before** installing the guard if
+   existing legacy delivery must continue up to cutover. Review and adapt the prepared
+   `scripts/legacy-questionnaire-header-patch.gs` to replace the legacy `E:X` read by header; its
+   function also verifies the response email. Do not install
    `scripts/apps-script-safe-email-trigger.gs`; it is a dangerous trigger draft.
-3. Run the idempotent `db/schema.sql` migration on an isolated Neon branch and verify the app there.
+5. Run the idempotent `db/schema.sql` migration on an isolated Neon branch and verify the app there.
    Production migration is a separate manual action. Existing reports have no linked Sheet row and
    are **not** automatically backfilled or re-queued; guessing a historical row could overwrite data.
-4. In a quiet, approved cutover window, set `LEGACY_EMAIL_ENABLED` off first. Only after the legacy
+6. In a quiet, approved cutover window, set `LEGACY_EMAIL_ENABLED` off first. Only after the legacy
    path is confirmed stopped, set `REPORT_EMAIL_ENABLED=true` in production. The master switch now
    also blocks queued sends and the cron while false.
-5. Review every disabled Neon report created during the gap against legacy delivery records. Put
+7. Review every disabled Neon report created during the gap against legacy delivery records. Put
    **only** approved, never-emailed report UUIDs in a newline-delimited IDs file. Run
    `scripts/requeue-disabled-reports.ts --ids-file <file> --since <ISO> --until <ISO>` as a dry run.
-   It rejects unlinked, attempted, accepted, expired, or out-of-window records and changes nothing.
+   It resolves each report by its Sheet ID/marker and rejects a nonblank Dashboard H or mismatched
+   Dashboard B, as well as attempted, accepted, expired, or out-of-window records. It changes nothing.
    Following explicit production approval, add `--apply --legacy-off-confirmed
 --legacy-delivery-audited`. The script only changes `disabled` to `pending`; delivery uses the
    existing atomic claim and `report-email/<id>` idempotency key. A repeated run skips already
    queued IDs. Reports older than 47 hours require a separate reviewed plan.
-6. Verify a preview send to a controlled address using a copied Sheet and Neon branch, then verify
+8. Verify a preview send to a controlled address using a copied Sheet and Neon branch, then verify
    the webhook and attached PDF. No such send was run here. For rollback, turn Resend off first,
    mark legacy Dashboard rows already accepted by Resend as sent, and only then re-enable legacy.
 
 ## Remaining risks and manual review
 
-- The live header row lacks both total counters. Their spelling and meaning need confirmation before
-  a production Sheet edit. The implementation tolerates their absence.
-- `sheet_row_number` can become stale if someone sorts, deletes, or inserts response rows. The sync
-  refuses a mismatched row and stays pending; an operator must relink it after review.
+- The live header row lacks both total counters. Their meaning and ownership need confirmation before
+  implementing or editing them.
+- A Sheet row can move between identity lookup and write because Google Sheets does not provide a
+  conditional cell update by value. Restrict manual sorting during active writes; review any failed
+  projection and its marker before operator repair. A missing or duplicated marker fails closed and
+  backs off rather than writing a guessed row.
 - Google Sheets is not transactional with Neon. A successfully persisted report may appear late in
   Sheets if the API is unavailable; the cron reconciles it later. A missed daily cron can delay it.
 - Reports created before this change have no safe row link. No automatic historical backfill is
@@ -90,3 +121,6 @@ for an authorized HTTP response; the server cannot prove the browser saved the f
   delivery cannot be ruled out until the manual audit and kill switch are complete.
 - Run the database migration before deploying this branch; the new store queries require the added
   columns. No migration or production deployment was performed here.
+- The live Sheet copy check was not run. Automatic approval review rejected copying the production
+  response Sheet because it would replicate respondent data into a new Drive file. Use an explicitly
+  approved isolated dataset for the real Sheets API `updatedCells` check before release.

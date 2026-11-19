@@ -6,7 +6,7 @@
  * data, and installs no triggers. It does not call or modify enviarCorreosPendientes().
  *
  * IMPORTANT: this is a RECONSTRUCTION from a written description of enviarCorreosPendientes()
- * (Dashboard A:I from row 2; Respuestas E:X; recommendations from answer indices 0,7,3,2,16 when
+ * (Dashboard A:I from row 2; questionnaire answers by header; recommendations from answer indices 0,7,3,2,16 when
  * the answer is "no", max 3; pie chart from the Dashboard percentages; GmailApp; H="Enviado",
  * I=timestamp). The original source was NOT available. Replace RECOMENDACIONES and buildHtml_
  * with the production texts/markup so the test renders what customers will really receive.
@@ -44,6 +44,40 @@ var RECOMENDACIONES = {
   16: 'Establece un plan de sucesión dentro de tu empresa.',
 };
 
+function leerRespuestasPorCabecera_(resp, fila, correoEsperado) {
+  var ancho = resp.getLastColumn();
+  var cabeceras = resp.getRange(1, 1, 1, ancho).getValues()[0];
+  var indices = {};
+  var correoIndice = -1;
+  cabeceras.forEach(function (valor, indice) {
+    var texto = String(valor).trim();
+    if (/^Correo\s*\*?$/i.test(texto)) {
+      if (correoIndice !== -1) throw new Error('Cabecera de correo duplicada. Abortado.');
+      correoIndice = indice;
+    }
+    var match = texto.match(/^([AB])\)\s*(\d{1,2})\s*[.:-]/i);
+    if (match) {
+      var id = match[1].toUpperCase() + Number(match[2]);
+      if (indices[id] !== undefined) throw new Error('Cabecera duplicada: ' + id);
+      indices[id] = indice;
+    }
+  });
+  if (correoIndice < 0) throw new Error('Falta cabecera Correo*. Abortado.');
+  var valores = resp.getRange(fila, 1, 1, ancho).getValues()[0];
+  if (String(valores[correoIndice]).trim().toLowerCase() !== correoEsperado.toLowerCase()) {
+    throw new Error('Correo de respuestas no coincide con Dashboard. Abortado.');
+  }
+  var respuestas = [];
+  ['A', 'B'].forEach(function (grupo) {
+    for (var n = 1; n <= 10; n++) {
+      var id = grupo + n;
+      if (indices[id] === undefined) throw new Error('Falta cabecera ' + id + '. Abortado.');
+      respuestas.push(valores[indices[id]]);
+    }
+  });
+  return respuestas;
+}
+
 function validarFilaPrueba_() {
   var fila = PRUEBA.FILA;
   if (!Number.isInteger(fila) || fila < 2) throw new Error('PRUEBA.FILA debe ser un entero >= 2.');
@@ -67,7 +101,7 @@ function validarFilaPrueba_() {
   }
   if (estado !== '') throw new Error('La columna H de la fila ' + fila + ' ya tiene valor ("' + estado + '"). Abortado.');
 
-  var respuestas = resp.getRange(fila, 5, 1, 20).getValues()[0]; // E:X of the SAME row number
+  var respuestas = leerRespuestasPorCabecera_(resp, fila, correo);
   if (respuestas.some(function (v) { return String(v).trim() === ''; })) {
     throw new Error('La fila ' + fila + ' de respuestas está incompleta. Abortado.');
   }
@@ -136,6 +170,7 @@ function armarEnvioPrueba() {
 
 /** Sends ONE email to CORREO_PRUEBA for PRUEBA.FILA. Requires armarEnvioPrueba() first. */
 function enviarCorreoPrueba() {
+  if (!legacyEmailEnabled_()) throw new Error('Legacy report email is disabled. No test sent.');
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) throw new Error('Otra ejecución está activa.');
   try {
