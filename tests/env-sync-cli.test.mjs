@@ -120,14 +120,120 @@ test('Preview writes only Preview after a Preview-specific confirmation', async 
   assertNoSecrets(assert, r.out.join('\n') + r.term.printed());
 });
 
-test('Preview refuses a variable that already belongs to Production', async () => {
+test('Production-only name is proposed for Preview and created only after approval', async () => {
   const ws = workspace();
-  const r = run(ws, ['--target', 'preview', '--expect-project', IDS.projectId], {
+  const preview = run(ws, ['--target', 'preview', '--dry-run'], {
     env: { FAKE_EXISTING: 'ANTHROPIC_API_KEY' },
   });
-  assert.equal(await r.done, 1);
+  assert.equal(await preview.done, 0);
+  assert.match(preview.out.join('\n'), /propose-preview\s+ANTHROPIC_API_KEY/);
   assert.equal(addCalls(ws).length, 0);
-  assert.match(r.err.join('\n'), /ambiguous in preview/);
+
+  const approved = run(
+    ws,
+    [
+      '--target',
+      'preview',
+      '--approve-new',
+      'ANTHROPIC_API_KEY',
+      '--expect-project',
+      IDS.projectId,
+    ],
+    { env: { FAKE_EXISTING: 'ANTHROPIC_API_KEY' } },
+  );
+  await prompted(approved.term);
+  approved.term.answer('sync preview');
+  assert.equal(await approved.done, 0, approved.err.join('\n'));
+  assert.deepEqual(
+    addCalls(ws).map((call) => call.argv),
+    [['env', 'add', 'ANTHROPIC_API_KEY', 'preview']],
+  );
+  assertNoSecrets(assert, approved.out.join('\n') + approved.term.printed());
+});
+
+test('Preview-only, shared, and conflicting records cannot be created with --approve-new', async () => {
+  const cases = [
+    [{ key: 'ANTHROPIC_API_KEY', target: ['preview'] }],
+    [{ key: 'ANTHROPIC_API_KEY', target: ['production', 'preview'] }],
+    [
+      { key: 'ANTHROPIC_API_KEY', target: ['production'] },
+      { key: 'ANTHROPIC_API_KEY', target: ['preview'] },
+    ],
+  ];
+  for (const records of cases) {
+    const ws = workspace();
+    const r = run(
+      ws,
+      [
+        '--target',
+        'preview',
+        '--approve-new',
+        'ANTHROPIC_API_KEY',
+        '--expect-project',
+        IDS.projectId,
+      ],
+      { env: { FAKE_RECORDS: JSON.stringify(records) } },
+    );
+    assert.equal(await r.done, 1);
+    assert.match(r.err.join('\n'), /Refusing to apply/);
+    assert.equal(addCalls(ws).length, 0);
+  }
+});
+
+test('approved Production-only entry can be created while a shared entry remains untouched', async () => {
+  const ws = workspace();
+  const records = [
+    { key: 'GOOGLE_PRIVATE_KEY', target: ['production'] },
+    { key: 'ANTHROPIC_API_KEY', target: ['production', 'preview'] },
+  ];
+  const r = run(
+    ws,
+    [
+      '--target',
+      'preview',
+      '--approve-new',
+      'GOOGLE_PRIVATE_KEY',
+      '--expect-project',
+      IDS.projectId,
+    ],
+    { env: { FAKE_RECORDS: JSON.stringify(records) } },
+  );
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 0, r.err.join('\n'));
+  assert.deepEqual(
+    addCalls(ws).map((call) => call.argv),
+    [['env', 'add', 'GOOGLE_PRIVATE_KEY', 'preview']],
+  );
+  assertNoSecrets(assert, r.out.join('\n') + r.term.printed());
+});
+
+test('Preview creation aborts if a Preview record appears after confirmation', async () => {
+  const ws = workspace();
+  const r = run(
+    ws,
+    [
+      '--target',
+      'preview',
+      '--approve-new',
+      'ANTHROPIC_API_KEY',
+      '--expect-project',
+      IDS.projectId,
+    ],
+    {
+      env: {
+        FAKE_LS_SEQ: JSON.stringify([
+          [{ key: 'ANTHROPIC_API_KEY', target: ['production'] }],
+          [{ key: 'ANTHROPIC_API_KEY', target: ['production', 'preview'] }],
+        ]),
+      },
+    },
+  );
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 1);
+  assert.match(r.err.join('\n'), /changed after the plan was shown/);
+  assert.equal(addCalls(ws).length, 0);
 });
 
 test('CLI 66.2.0 repo.json link resolves from repository root and validates expected project', async () => {

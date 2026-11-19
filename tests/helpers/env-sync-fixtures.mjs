@@ -30,7 +30,7 @@ export const IDS = { projectId: 'prj_test123', orgId: 'team_test456' };
  *   FAKE_LS_EXTRA    JSON object merged into the `env ls` document (hiddenProductionEnvCount, pagination)
  *   FAKE_CUSTOM_ENVS JSON array returned as `environments` by the custom-environments API call
  *   FAKE_API_FAIL / FAKE_API_RAW   make the custom-environments call fail / print raw text
- * `env add` without --force refuses an existing variable (listed or hidden), like the real CLI/API.
+ * `env add` without --force refuses an existing variable in the same target (or a hidden record).
  */
 function fakeVercel(dir) {
   const bin = path.join(dir, 'fake-vercel.mjs');
@@ -89,7 +89,10 @@ if (argv[0] === 'env' && argv[1] === 'add') {
     process.exit(1);
   }
   const hidden = (process.env.FAKE_HIDDEN ?? '').split(',').filter(Boolean);
-  const exists = hidden.includes(argv[2]) || currentRecords().some((r) => r.key === argv[2]);
+  const target = argv[3];
+  const exists = hidden.includes(argv[2]) || currentRecords().some((r) =>
+    r.key === argv[2] && (Array.isArray(r.target) ? r.target : [r.target]).includes(target)
+  );
   if (exists && !argv.includes('--force')) {
     console.error('Error: A variable with the name ' + argv[2] + ' already exists');
     process.exit(1);
