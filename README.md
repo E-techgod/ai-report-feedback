@@ -106,5 +106,5 @@ Set `NEXT_PUBLIC_BOOKING_URL` to the real, published Google Appointment Schedule
 - Must validate privacy/consent language and suitability of questions before a public blast.
 - No scoring adjustments for nonapplicable questions. All twenty must be answered. Confirm this business rule before launch.
 - Questionnaire responses live only in the header-mapped Google Sheet. Reports and PDFs are not stored anywhere: the browser holds the report in memory and the PDF is rendered only for a request carrying a valid, unexpired, report-specific grant; there are no public links.
-- Rate limiting / CAPTCHA (the database-backed limits were removed with Neon: use a Vercel Firewall rate-limit rule on `/api/questionnaire`), spam monitoring, credential rotation, retention policies, authorized staff access, and legal review are needed before a high-volume campaign.
+- Rate limiting / CAPTCHA (the database-backed limits were removed with Neon: use the Vercel Firewall rule in `docs/pdf-download.md`), spam monitoring, credential rotation, retention policies, authorized staff access, and legal review are needed before a high-volume campaign.
 - Ensure Vercel plan permits commercial usage. Secrets must never be in `NEXT_PUBLIC_` vars or committed.

@@ -44,3 +44,31 @@ one row's `Estado Reporte` cell to `Generado`, after the response is sent:
 
 Every other tracking column (`Estado Email`, `Estado Descarga PDF`, `Fecha *`, `Intentos Email`, ...)
 stays empty: there is nothing to project. The legacy Apps Script files in `scripts/` are untouched.
+
+## Production rate limiting (Vercel Firewall, no code)
+
+The Neon-backed limits (10 submissions per IP per minute, 5 reports per email per day) are gone, so
+`/api/questionnaire` is otherwise open: each call costs one Groq request, several Google Sheets
+calls and one appended row. Smallest viable protection, one dashboard rule on the Production
+project (**Firewall -> Custom Rules -> New rule**):
+
+| Setting           | Value                                                                         |
+| ----------------- | ----------------------------------------------------------------------------- |
+| Name              | `questionnaire-rate-limit`                                                    |
+| If                | Request Path **equals** `/api/questionnaire` **and** Method **equals** `POST` |
+| Then              | **Rate Limit**                                                                |
+| Strategy          | Fixed Window                                                                  |
+| Window / Requests | 60 s / 10 requests                                                            |
+| Key               | IP address                                                                    |
+| Action when over  | default `429 Too Many Requests`                                               |
+
+- 10 per minute per IP is the limit the app enforced before; a real person submits once.
+- One rule fits the Hobby allowance (1 rate-limit rule, 3 custom rules); `/api/report/pdf` needs a
+  valid grant and is not worth a second rule. Hobby reports exist of the dashboard asking to upgrade
+  when choosing a custom 429 response: keep the default action if that happens.
+- Verify after publishing: send 11 `POST /api/questionnaire` requests with body `{}` from one IP
+  (they are rejected with 400 before touching Sheets or the AI, so the test is free); the 11th must
+  return 429. Remember the budget is per IP.
+- Residual risk: many IPs (botnet) or many people behind one NAT. If abuse appears, add Vercel
+  BotID or a challenge action; do not add a database or in-memory limiter.
+- This is a Production dashboard change: it is **not** applied by this PR.

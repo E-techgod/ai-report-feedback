@@ -48,3 +48,22 @@ test('the expired state copy is exactly the specified message', () => {
   assert.ok(text.includes("expired: 'Tu sesión de descarga ha expirado.'"));
   assert.match(text, /disabled=\{pdfBusy \|\| expired\}/);
 });
+
+test('the dev preview download picker cannot bypass the Production restriction', async () => {
+  // 1) The preview page is not served in production builds (Vercel Preview and Production both).
+  const page = readFileSync(new URL('../src/app/report-preview/page.tsx', import.meta.url), 'utf8');
+  assert.match(page, /process\.env\.NODE_ENV === 'production'\) notFound\(\)/);
+  // 2) Even if it were reachable, its placeholder token is worthless to the real server.
+  const client = readFileSync(
+    new URL('../src/app/report-preview/PreviewClient.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(client, /token: 'preview'/);
+  const { verifyDownloadGrant } = await import('../src/lib/download-grant.ts');
+  const report = sampleReport();
+  for (const offset of [0, 1_000])
+    assert.equal(
+      verifyDownloadGrant(report, 'preview', 's'.repeat(32), new Date(Date.now() + offset)),
+      'invalid',
+    );
+});
