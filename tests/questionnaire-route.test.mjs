@@ -4,6 +4,7 @@ import { handleQuestionnaire } from '../src/lib/questionnaire-handler.ts';
 import { verifyDownloadGrant } from '../src/lib/download-grant.ts';
 import { handlePdfDownload } from '../src/lib/report-pdf-handler.ts';
 import { questionIds } from '../src/lib/questions.ts';
+import { wallClock } from '../src/lib/sheets.ts';
 import { reportDeps, submission } from './helpers/flow-harness.mjs';
 
 const headers = [
@@ -369,6 +370,8 @@ test('a page refresh (new submission id, same person and answers) reuses the row
   const first = submission();
   await handleQuestionnaire(request(first), ctx);
   await flush();
+  // Google returns dates as serial numbers; the fake stores text, so mirror the real shape.
+  sheet.rows[1][0] = wallClock(new Date(), 'Etc/GMT+6').serial;
   const refreshed = await (
     await handleQuestionnaire(request({ ...first, id: crypto.randomUUID() }), ctx)
   ).json();
