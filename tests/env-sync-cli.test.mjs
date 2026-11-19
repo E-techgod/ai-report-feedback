@@ -116,7 +116,9 @@ test('Preview writes only Preview after a Preview-specific confirmation', async 
   r.term.answer('sync preview');
   assert.equal(await r.done, 0, r.err.join('\n'));
   assert.ok(addCalls(ws).length > 0);
-  assert.ok(addCalls(ws).every((call) => call.argv[3] === 'preview'));
+  assert.ok(
+    addCalls(ws).every((call) => call.argv.includes('--environment') && call.argv[4] === 'preview'),
+  );
   assertNoSecrets(assert, r.out.join('\n') + r.term.printed());
 });
 
@@ -146,7 +148,7 @@ test('Production-only name is proposed for Preview and created only after approv
   assert.equal(await approved.done, 0, approved.err.join('\n'));
   assert.deepEqual(
     addCalls(ws).map((call) => call.argv),
-    [['env', 'add', 'ANTHROPIC_API_KEY', 'preview']],
+    [['env', 'add', 'ANTHROPIC_API_KEY', '--environment', 'preview', '--project', IDS.projectId]],
   );
   assertNoSecrets(assert, approved.out.join('\n') + approved.term.printed());
 });
@@ -203,7 +205,7 @@ test('approved Production-only entry can be created while a shared entry remains
   assert.equal(await r.done, 0, r.err.join('\n'));
   assert.deepEqual(
     addCalls(ws).map((call) => call.argv),
-    [['env', 'add', 'GOOGLE_PRIVATE_KEY', 'preview']],
+    [['env', 'add', 'GOOGLE_PRIVATE_KEY', '--environment', 'preview', '--project', IDS.projectId]],
   );
   assertNoSecrets(assert, r.out.join('\n') + r.term.printed());
 });
@@ -234,6 +236,109 @@ test('Preview creation aborts if a Preview record appears after confirmation', a
   assert.equal(await r.done, 1);
   assert.match(r.err.join('\n'), /changed after the plan was shown/);
   assert.equal(addCalls(ws).length, 0);
+});
+
+test('exit-zero no-op is reported as unverified and stops before the next create', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const r = run(
+    ws,
+    [
+      '--target',
+      'preview',
+      '--approve-new',
+      'NEW_SERVICE_TOKEN,UNRELATED_LOCAL_VAR',
+      '--expect-project',
+      IDS.projectId,
+    ],
+    { env: { FAKE_NO_PERSIST: '1' } },
+  );
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 1);
+  assert.deepEqual(
+    addCalls(ws).map((call) => call.argv[2]),
+    ['NEW_SERVICE_TOKEN'],
+  );
+  assert.match(
+    r.out.join('\n'),
+    /UNVERIFIED NEW_SERVICE_TOKEN.*no new independent preview-only record/,
+  );
+  assert.doesNotMatch(r.out.join('\n'), /ok\s+NEW_SERVICE_TOKEN/);
+  assert.doesNotMatch(r.out.join('\n'), /new-service-secret-value/);
+});
+
+test('a failed post-write listing stops before the next create', async () => {
+  const ws = workspace({ extraEnv: ['NEW_SERVICE_TOKEN=new-service-secret-value'] });
+  const r = run(
+    ws,
+    [
+      '--target',
+      'preview',
+      '--approve-new',
+      'NEW_SERVICE_TOKEN,UNRELATED_LOCAL_VAR',
+      '--expect-project',
+      IDS.projectId,
+    ],
+    { env: { FAKE_LS_FAIL_AFTER_ADD: '1' } },
+  );
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 1);
+  assert.deepEqual(
+    addCalls(ws).map((call) => call.argv[2]),
+    ['NEW_SERVICE_TOKEN'],
+  );
+  assert.match(
+    r.out.join('\n'),
+    /UNVERIFIED NEW_SERVICE_TOKEN.*fresh Vercel listing could not be verified/,
+  );
+});
+
+test('exit-zero CLI action_required response is rejected without reporting success', async () => {
+  const ws = workspace();
+  const r = run(
+    ws,
+    [
+      '--target',
+      'preview',
+      '--approve-new',
+      'ANTHROPIC_API_KEY',
+      '--expect-project',
+      IDS.projectId,
+    ],
+    {
+      env: {
+        FAKE_EXISTING: 'ANTHROPIC_API_KEY',
+        FAKE_ACTION_REQUIRED: '1',
+      },
+    },
+  );
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 1);
+  assert.match(r.out.join('\n'), /requested further action \(git_branch_required\)/);
+  assert.doesNotMatch(r.out.join('\n'), /ok\s+ANTHROPIC_API_KEY/);
+});
+
+test('a wrong-scope exit-zero write is not accepted as a Preview creation', async () => {
+  const ws = workspace();
+  const r = run(
+    ws,
+    [
+      '--target',
+      'preview',
+      '--approve-new',
+      'ANTHROPIC_API_KEY',
+      '--expect-project',
+      IDS.projectId,
+    ],
+    { env: { FAKE_EXISTING: 'ANTHROPIC_API_KEY', FAKE_WRONG_TARGET: 'production' } },
+  );
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 1);
+  assert.match(r.out.join('\n'), /UNVERIFIED ANTHROPIC_API_KEY/);
+  assert.equal(addCalls(ws).length, 1);
 });
 
 test('CLI 66.2.0 repo.json link resolves from repository root and validates expected project', async () => {
@@ -297,7 +402,7 @@ test('Preview new-name approval uses Preview and still requires the typed phrase
   assert.equal(await r.done, 0, r.err.join('\n'));
   assert.deepEqual(
     addCalls(ws).map((call) => call.argv),
-    [['env', 'add', 'NEW_SERVICE_TOKEN', 'preview']],
+    [['env', 'add', 'NEW_SERVICE_TOKEN', '--environment', 'preview', '--project', IDS.projectId]],
   );
   assert.doesNotMatch(r.out.join('\n') + r.term.printed(), /new-service-secret-value/);
 });
@@ -377,7 +482,10 @@ test('apply with the right project and phrase writes through the CLI with the ex
       'env',
       'add',
       name,
-      'production', // a create never carries --force
+      '--environment',
+      'production',
+      '--project',
+      IDS.projectId, // a create never carries --force
     ]),
   );
   assertNoSecrets(assert, r.out.join('\n') + r.term.printed() + r.err.join('\n'));
