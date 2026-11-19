@@ -69,6 +69,15 @@ Vercel Cron ──GET /api/cron/retry-emails (once a day, 12:00 UTC)──▶ re
 | `CRON_SECRET`                                        | Vercel Cron bearer secret. The recovery sweep runs once a day (see "Recovery schedule").                |
 | `GOOGLE_*`, `ANTHROPIC_*`, `NEXT_PUBLIC_BOOKING_URL` | Existing. Redeploy after changing the booking URL.                                                      |
 
+### Resetting the per-email limit (development only)
+
+A recipient gets at most 5 new reports per fixed 24 h window; the counter is the single `rate_limits`
+row `email:<sha256 of the lowercased address>` (deleting reports does not reset it). To inspect or
+reset it for a test address, use `npm run dev:reset-email-limit -- --email <address>`. It is read-only
+by default. `--apply` deletes only that row and is refused on protected Neon branches (`production`,
+`main`, ...), in production environments, for addresses outside `REPORT_EMAIL_ALLOWLIST`, and without
+`--confirm-endpoint` and `--confirm-email`. Reports, email history and dedupe records are never touched.
+
 ### Test gate: `REPORT_EMAIL_ALLOWLIST`
 
 For a controlled live test with `REPORT_EMAIL_ENABLED=true`: set this to the test inbox only. Reports for
