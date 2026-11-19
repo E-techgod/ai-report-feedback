@@ -30,7 +30,8 @@ export async function GET(req: Request) {
     for (const id of ids) {
       if (Date.now() - trackingStarted > 12_000) break;
       try {
-        if (await deps.syncTracking(id)) trackingSynced += 1;
+        if (await deps.syncTracking(id, Math.min(8_000, 12_000 - (Date.now() - trackingStarted))))
+          trackingSynced += 1;
       } catch {
         trackingFailed += 1;
         console.error(`[tracking] report ${id}: sync-failed`);

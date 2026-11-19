@@ -28,18 +28,18 @@ test('maps the live inserted tracking columns and question headers', () => {
   assert.equal(schema.tracking.reportId, 13);
   assert.equal(schema.questions.A1, 15);
   assert.equal(schema.questions.B10, 34);
-  assert.equal(schema.tracking.totalReports, undefined);
+  assert.equal(Object.hasOwn(schema.tracking, 'totalReports'), false);
   assert.equal(columnLetter(schema.questions.B10), 'AI');
 });
 
-test('maps reordered headers and optional totals by name', () => {
+test('maps reordered headers and ignores undefined total counters', () => {
   const rearranged = [...headers, 'Total Emails', 'Total Reportes'];
   [rearranged[3], rearranged[20]] = [rearranged[20], rearranged[3]];
   const schema = parseSheetSchema(rearranged);
   assert.equal(schema.email, 20);
   assert.equal(schema.questions.A6, 3);
-  assert.equal(schema.tracking.totalReports, 36);
-  assert.equal(schema.tracking.totalEmails, 35);
+  assert.equal(Object.hasOwn(schema.tracking, 'totalReports'), false);
+  assert.equal(Object.hasOwn(schema.tracking, 'totalEmails'), false);
 });
 
 test('fails closed on missing or duplicate required headers', () => {

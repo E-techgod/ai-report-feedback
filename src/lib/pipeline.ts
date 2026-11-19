@@ -58,7 +58,7 @@ export const DEFAULT_CONFIG: Omit<PipelineConfig, 'bookingUrl' | 'emailEnabled' 
 export type PipelineDeps = {
   store: ReportStore;
   /** Best-effort projection of the latest Neon state into the linked Sheet row. */
-  syncTracking?: (reportId: string) => Promise<boolean>;
+  syncTracking?: (reportId: string, budgetMs?: number) => Promise<boolean>;
   generateNarrative: (model: ReportModel) => Promise<NarrativeOutcome>;
   renderPdf: (report: FinalReport) => Promise<Buffer>;
   mailer: Mailer | null;
@@ -152,7 +152,7 @@ export async function createReport(
 
 async function syncSafely(deps: PipelineDeps, reportId: string) {
   try {
-    await deps.syncTracking?.(reportId);
+    await deps.syncTracking?.(reportId, 8_000);
   } catch {
     console.error(`[tracking] report ${reportId}: sync-failed`);
   }

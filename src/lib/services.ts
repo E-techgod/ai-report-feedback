@@ -16,7 +16,9 @@ export function getPipelineDeps(): PipelineDeps | null {
   const sheet = createGoogleSheetsGateway();
   return {
     store,
-    syncTracking: sheet ? (id) => syncReportTracking(store, sheet, id) : undefined,
+    syncTracking: sheet
+      ? (id, budgetMs) => syncReportTracking(store, sheet, id, budgetMs)
+      : undefined,
     mailer: mailerFromEnv(),
     generateNarrative,
     renderPdf: renderReportPdf,

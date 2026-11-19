@@ -13,9 +13,6 @@ export const TRACKING_HEADERS = {
   lastError: 'Último Error',
   reportId: 'ID Reporte',
   emailAttempts: 'Intentos Email',
-  // Optional future columns: absent from the live header row at audit time.
-  totalReports: 'Total Reportes',
-  totalEmails: 'Total Emails',
 } as const;
 
 export type SheetSchema = {
