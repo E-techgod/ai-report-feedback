@@ -5,21 +5,21 @@ import path from 'node:path';
 import type * as ReactPdf from '@react-pdf/renderer';
 import type { FinalReport } from '../final-report';
 import { buildReportContent, type AreaContent, type ReportContent } from '../report-content';
+import { palette } from '../design-tokens';
 
 /**
  * Server-side PDF of the finalized report. Rendered from buildReportContent(report) — the same
  * content object the web view and the email use — never from browser state.
  */
 const C = {
-  ink: '#ffffff',
-  muted: '#a1a4ad',
-  line: '#34363c',
-  forest: '#1a1a1c',
-  gold: '#d95d1e',
-  soft: '#1d1e22',
-  amber: '#d95d1e',
-  amberBg: '#d95d1e',
-  greenBg: '#d95d1e',
+  ink: palette.text,
+  muted: palette.secondaryText,
+  line: palette.border,
+  forest: palette.secondaryBackground,
+  gold: palette.accent,
+  soft: palette.secondaryBackground,
+  amberBg: palette.accent,
+  greenBg: palette.accent,
 };
 
 function loadLogo(): Buffer | null {
@@ -39,7 +39,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
   Font.registerHyphenationCallback((word) => [word]);
   const styles = StyleSheet.create({
     page: {
-      backgroundColor: '#000000',
+      backgroundColor: palette.background,
       paddingTop: 100,
       paddingBottom: 56,
       paddingHorizontal: 42,
@@ -63,7 +63,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
     logoBox: {
       width: 110,
       height: 48,
-      backgroundColor: '#000000',
+      backgroundColor: palette.background,
       borderRadius: 4,
       justifyContent: 'center',
       alignItems: 'center',
@@ -83,7 +83,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
     eyebrow: {
       fontSize: 8,
       letterSpacing: 1.4,
-      color: C.gold,
+      color: palette.accentText,
       textTransform: 'uppercase',
       marginBottom: 6,
     },
@@ -131,7 +131,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
     level: {
       fontSize: 9,
       fontFamily: 'Helvetica-Bold',
-      color: '#000000',
+      color: C.ink,
       backgroundColor: C.amberBg,
       paddingVertical: 3,
       paddingHorizontal: 7,
@@ -139,7 +139,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       alignSelf: 'flex-start',
       marginTop: 6,
     },
-    levelGreen: { color: '#000000', backgroundColor: C.greenBg },
+    levelGreen: { color: C.ink, backgroundColor: C.greenBg },
     barTrack: { height: 6, backgroundColor: C.line, borderRadius: 3, marginTop: 8 },
     barFill: { height: 6, backgroundColor: C.gold, borderRadius: 3 },
     scoreSub: { fontSize: 9, color: C.muted, marginTop: 4 },
@@ -156,7 +156,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       marginBottom: 2,
       fontSize: 15,
       fontFamily: 'Helvetica-Bold',
-      color: C.ink,
+      color: C.gold,
     },
     secSub: { fontSize: 9.5, color: C.muted },
     panel: { backgroundColor: C.soft, borderRadius: 6, padding: 12, marginBottom: 8 },
@@ -191,13 +191,13 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
     },
     chip: {
       fontSize: 7.5,
-      color: '#000000',
+      color: C.ink,
       backgroundColor: C.amberBg,
       paddingVertical: 2,
       paddingHorizontal: 6,
       borderRadius: 7,
     },
-    chipGreen: { color: '#000000', backgroundColor: C.greenBg },
+    chipGreen: { color: C.ink, backgroundColor: C.greenBg },
     priority: {
       backgroundColor: C.soft,
       flexDirection: 'row',
@@ -213,7 +213,7 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       height: 22,
       borderRadius: 11,
       backgroundColor: C.gold,
-      color: '#000000',
+      color: C.ink,
       textAlign: 'center',
       paddingTop: 5,
       fontSize: 10,
@@ -229,12 +229,12 @@ function buildDocument(r: typeof ReactPdf, c: ReportContent, logo: Buffer | null
       borderLeftColor: C.gold,
       paddingLeft: 9,
     },
-    cta: { backgroundColor: C.forest, color: '#fff', borderRadius: 8, padding: 16, marginTop: 14 },
-    ctaTitle: { fontSize: 13, fontFamily: 'Helvetica-Bold', color: '#fff', marginBottom: 4 },
+    cta: { backgroundColor: C.forest, color: C.ink, borderRadius: 8, padding: 16, marginTop: 14 },
+    ctaTitle: { fontSize: 13, fontFamily: 'Helvetica-Bold', color: C.ink, marginBottom: 4 },
     ctaText: { fontSize: 9.5, color: C.muted, marginBottom: 8 },
     ctaButton: {
       backgroundColor: C.gold,
-      color: '#000000',
+      color: C.ink,
       fontFamily: 'Helvetica-Bold',
       fontSize: 10,
       paddingVertical: 6,

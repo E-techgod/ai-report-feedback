@@ -1,12 +1,19 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 :root {
-  --ink: #ffffff;
-  --muted: #a1a4ad;
-  --line: #34363c;
-  --gold: #d95d1e;
-  --bg: #000000;
-  --green: #d95d1e;
+  --color-background: #ffffff;
+  --color-text: #111111;
+  --color-accent: #e66b22;
+  --color-accent-text: #a7430c;
+  --color-surface: #f7f7f7;
+  --color-muted: #666666;
+  --color-border: #e5e5e5;
+  --ink: var(--color-text);
+  --muted: var(--color-muted);
+  --line: var(--color-border);
+  --gold: var(--color-accent);
+  --bg: var(--color-background);
+  --green: var(--color-accent);
 }
 * {
   box-sizing: border-box;
@@ -33,7 +40,7 @@ body {
 .header {
   height: 82px;
   border-bottom: 1px solid var(--line);
-  background: #000000;
+  background: var(--color-background);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -55,7 +62,7 @@ body {
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  background: #000;
+  background: var(--color-background);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -82,7 +89,7 @@ body {
 }
 .eyebrow,
 .section-label {
-  color: var(--gold);
+  color: var(--color-accent-text);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.16em;
@@ -113,11 +120,11 @@ body {
   margin-top: 35px;
   font-size: 12px;
   font-weight: 700;
-  color: var(--gold);
+  color: var(--color-accent-text);
 }
 .progress {
   height: 5px;
-  background: #34363c;
+  background: var(--color-border);
   border-radius: 8px;
   margin: 11px 0 27px;
   overflow: hidden;
@@ -128,11 +135,11 @@ body {
   transition: width 0.2s;
 }
 .panel {
-  background: #1d1e22;
+  background: var(--color-surface);
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: clamp(24px, 4.2vw, 50px);
-  box-shadow: 0 15px 50px rgba(0, 0, 0, 0.24);
+  box-shadow: 0 12px 36px rgba(17, 17, 17, 0.04);
 }
 h2 {
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
@@ -166,14 +173,14 @@ input:not([type='checkbox']) {
   padding: 15px 14px;
   border-radius: 8px;
   border: 1px solid var(--line);
-  background: #16171a;
+  background: var(--color-background);
   color: var(--ink);
   font: inherit;
   font-weight: 400;
   outline: none;
 }
 input:not([type='checkbox'])::placeholder {
-  color: #858891;
+  color: var(--color-muted);
 }
 input:focus-visible,
 button:focus-visible,
@@ -195,7 +202,7 @@ a:focus-visible {
   accent-color: var(--gold);
 }
 a {
-  color: var(--gold);
+  color: var(--color-accent-text);
 }
 button,
 .primary,
@@ -217,17 +224,17 @@ button:disabled {
 }
 .primary {
   background: var(--green);
-  color: #000000;
+  color: var(--color-text);
   border: 1px solid var(--green);
   min-height: 49px;
 }
 .primary:hover:not(:disabled) {
-  background: #b94d17;
+  background: #c75818;
 }
 .secondary {
-  background: #16171a;
+  background: var(--color-background);
   border: 1px solid var(--line);
-  color: var(--green);
+  color: var(--color-text);
   min-height: 49px;
 }
 .fine {
@@ -236,8 +243,8 @@ button:disabled {
   margin: 17px 0 0;
 }
 .error {
-  color: #ffb4a8;
-  background: #46221f;
+  color: #9b2f23;
+  background: #fff1ed;
   padding: 12px;
   border-radius: 8px;
   font-size: 13px;
@@ -255,7 +262,7 @@ button:disabled {
 }
 .qnumber {
   font-size: 12px;
-  color: var(--gold);
+  color: var(--color-accent-text);
   font-weight: 800;
   margin-top: 4px;
 }
@@ -280,8 +287,8 @@ button:disabled {
 }
 .answer button {
   border: 0;
-  background: #16171a;
-  color: var(--muted);
+  background: var(--color-background);
+  color: var(--ink);
   border-radius: 0;
   padding: 10px 18px;
   font-size: 13px;
@@ -292,7 +299,7 @@ button:disabled {
 }
 .answer button.chosen {
   background: var(--green);
-  color: #000000;
+  color: var(--color-text);
 }
 .actions {
   display: flex;
@@ -350,7 +357,7 @@ footer {
 }
 @media print {
   body {
-    background: #16171a;
+    background: var(--color-background);
   }
   .header,
   .progress,
@@ -377,12 +384,12 @@ footer {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.92);
+  background: rgba(255, 255, 255, 0.94);
 }
 .generating-card {
   max-width: 420px;
   text-align: center;
-  background: #1d1e22;
+  background: var(--color-surface);
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 32px 28px;
