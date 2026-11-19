@@ -104,18 +104,5 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
       );
       return data.totalUpdatedCells ?? 0;
     },
-
-    async readDashboardEmailState(rowNumber) {
-      const { data } = await sheets.spreadsheets.values.get(
-        {
-          spreadsheetId,
-          range: `'Dashboard'!B${rowNumber}:H${rowNumber}`,
-          valueRenderOption: 'UNFORMATTED_VALUE',
-        },
-        options,
-      );
-      const row = data.values?.[0] ?? [];
-      return { email: String(row[0] ?? ''), status: String(row[6] ?? '') };
-    },
   };
 }

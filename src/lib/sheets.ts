@@ -36,8 +36,6 @@ export interface SheetsGateway {
     cells: Array<{ index: number; value: string | number }>,
     timeoutMs?: number,
   ): Promise<number>;
-  /** Dashboard B/H for the matching response row; used only by dry-run cutover review. */
-  readDashboardEmailState?(rowNumber: number): Promise<{ email: string; status: string }>;
 }
 
 export type SubmitStatus = 'created' | 'duplicate';

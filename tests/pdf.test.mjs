@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { extractText, getDocumentProxy } from 'unpdf';
 import { renderReportPdf } from '../src/lib/pdf/ReportPdf.tsx';
-import { buildEmail } from '../src/lib/email.ts';
 import { buildReportContent, flattenContent } from '../src/lib/report-content.ts';
 import { sampleReport, SAMPLE_YES } from './helpers/fixtures.mjs';
 import { questionIds } from '../src/lib/questions.ts';
@@ -44,12 +43,10 @@ test('PDF stays short for AI-written and template reports', async () => {
   }
 });
 
-test('booking URL is identical in the web content, the email and the PDF link', async () => {
+test('booking URL is identical in the web content and the PDF link', async () => {
   const url = 'https://www.quirongroup.com/calendario-jag';
   const report = sampleReport({ bookingUrl: url });
   assert.equal(buildReportContent(report).cta.url, url);
-  assert.ok(buildEmail(report).html.includes(`href="${url}"`));
-  assert.ok(buildEmail(report).text.includes(url));
 
   const pdf = await getDocumentProxy(new Uint8Array(await renderReportPdf(report)));
   const links = [];

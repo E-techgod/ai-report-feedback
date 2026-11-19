@@ -11,16 +11,11 @@
     "test": "node --import tsx --test tests/*.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "db:migrate": "node --env-file=.env --import tsx scripts/db-migrate.ts",
     "env:check": "node --import tsx scripts/env-sync-production.ts --check",
     "env:sync:preview": "node --import tsx scripts/env-sync-production.ts --target preview",
-    "env:sync:production": "node --import tsx scripts/env-sync-production.ts",
-    "dev:reset-email-limit": "node --env-file=.env --import tsx scripts/dev-reset-email-limit.ts"
+    "env:sync:production": "node --import tsx scripts/env-sync-production.ts"
   },
   "dependencies": {
-    "@neon/config": "^1.14.4",
-    "@neon/env": "^2.1.7",
-    "@neondatabase/serverless": "^1.2.1",
     "@react-pdf/renderer": "^4.9.0",
     "googleapis": "^190.0.0",
     "next": "^15.5.0",
@@ -29,7 +24,6 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.16",
     "@eslint/eslintrc": "^3.3.7",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
