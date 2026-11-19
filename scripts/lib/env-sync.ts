@@ -1,5 +1,5 @@
 /**
- * Local `.env` -> Vercel Production synchronization (library; CLI in scripts/env-sync-production.ts).
+ * Local `.env` -> Vercel Preview or Production synchronization.
  *
  * Safety properties, all covered by tests/env-sync*.test.mjs:
  *  - only an explicit allowlist of variable names is ever read or written; two high-impact secrets
@@ -8,14 +8,14 @@
  *    printed plan; all CLI output is redacted before it is shown;
  *  - nothing is deleted (no `env rm`) and no deployment is triggered;
  *  - FAIL CLOSED on ambiguity: a variable is only written when it either does not exist at all or
- *    exists as exactly one Production-only record. A variable shared with Preview/Development, split
+ *    exists as exactly one target-only record. A variable shared with another environment, split
  *    across records, branch-scoped or of unknown scope is never touched (we cannot prove that an
  *    upsert would leave the other environments alone);
  *  - a CREATE never uses `--force`, so the CLI/API refuses it if the variable exists after all (for
  *    example a Production record the listing did not show); `--force` is only used to overwrite a
  *    record that was proven to be a lone Production-only one;
  *  - `vercel env ls --format json` does not report custom-environment membership, so a record with
- *    target ["production"] could also belong to a custom environment. The project's custom
+ *    one target could also belong to a custom environment. The project's custom
  *    environments are therefore read as well: if they cannot be read, nothing is written; if any
  *    exist, no existing variable is overwritten;
  *  - the existing-variable state is read again after the operator confirms and before the first
@@ -23,7 +23,7 @@
  *  - the Vercel project is identified (projectId/orgId) before any write, pinned for the child
  *    process, and an apply must name the expected projectId;
  *  - the local env file must be git-ignored and untracked, or the run aborts;
- *  - Production is only modified after an explicit typed confirmation; `--dry-run` never writes.
+ *  - a target is only modified after an explicit typed confirmation; `--dry-run` never writes.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -72,6 +72,7 @@ export const NEVER_SYNCED = [
 
 export const PHRASE_STANDARD = 'sync production';
 export const PHRASE_ROTATION = 'rotate production secrets';
+export type SyncTarget = 'preview' | 'production';
 
 const OPT_IN_WARNINGS: Record<string, string> = {
   REPORT_TOKEN_SECRET:
@@ -221,13 +222,14 @@ export type Classification =
 
 /**
  * Fail closed. Safe to write only when the variable is absent everywhere (a create, which never
- * overwrites), or is exactly one Production-only record without a branch AND the project has no
+ * overwrites), or is exactly one target-only record without a branch AND the project has no
  * custom environments (the CLI listing cannot say whether such a record also belongs to one).
  */
 export function classifyVariable(
   name: string,
   records: readonly EnvRecord[],
   customEnvironments: number,
+  target: SyncTarget = 'production',
 ): Classification {
   if (!Number.isInteger(customEnvironments) || customEnvironments < 0)
     return { kind: 'blocked', reason: 'custom environments could not be verified' };
@@ -246,7 +248,7 @@ export function classifyVariable(
       reason: `shared with ${record.customEnvironmentIds.length} custom environment(s); split it in the dashboard first`,
     };
   const targets = [...new Set(record.targets)];
-  if (targets.length === 1 && targets[0] === 'production') {
+  if (targets.length === 1 && targets[0] === target) {
     if (customEnvironments > 0)
       return {
         kind: 'blocked',
@@ -259,7 +261,7 @@ export function classifyVariable(
   const where = targets.length ? targets.join(', ') : 'no standard environment (custom?)';
   return {
     kind: 'blocked',
-    reason: `not Production-only (${where}); a Production update cannot be guaranteed to leave the other environments alone. Split it in the dashboard first`,
+    reason: `not ${target}-only (${where}); a ${target} update cannot be guaranteed to leave the other environments alone. Split it in the dashboard first`,
   };
 }
 
@@ -293,6 +295,7 @@ export function buildPlan(
   local: Record<string, string>,
   state: ProjectState | null,
   names: readonly string[] = SYNC_DEFAULT,
+  target: SyncTarget = 'production',
 ): PlanItem[] {
   return names.map((name): PlanItem => {
     const value = local[name];
@@ -300,7 +303,7 @@ export function buildPlan(
     if (value.trim() === '') return { name, operation: 'skip', note: 'empty value' };
     const note = PLAN_NOTES[name];
     if (!state || !state.ok) return { name, operation: 'upsert', note: note ?? 'unverified' };
-    const verdict = classifyVariable(name, state.records, state.customEnvironments);
+    const verdict = classifyVariable(name, state.records, state.customEnvironments, target);
     if (verdict.kind === 'blocked') return { name, operation: 'blocked', note: verdict.reason };
     return { name, operation: verdict.kind, note };
   });
@@ -410,9 +413,9 @@ export interface VercelRunner {
   listRecords(): Promise<ListResult>;
   /** How many custom environments the project has, or why that could not be established. */
   listCustomEnvironments(): Promise<CustomEnvResult>;
-  /** Add a Production variable that must not exist yet (no `--force`); value on stdin only. */
+  /** Add a target variable that must not exist yet (no `--force`); value on stdin only. */
   createVariable(name: string, value: string): Promise<void>;
-  /** Overwrite a proven Production-only variable (`--force`); value on stdin only. */
+  /** Overwrite a proven target-only variable (`--force`); value on stdin only. */
   updateVariable(name: string, value: string): Promise<void>;
 }
 
@@ -485,11 +488,12 @@ export const customEnvironmentsArgs = (projectId: string): string[] => [
 export function createVercelRunner(options: {
   bin: string;
   cwd: string;
+  target?: SyncTarget;
   /** Environment for the child; carries the pinned project identity. */
   env: NodeJS.ProcessEnv;
   secrets: () => Iterable<string>;
 }): VercelRunner {
-  const { bin, cwd, env, secrets } = options;
+  const { bin, cwd, env, secrets, target = 'production' } = options;
   const read = async <T extends { ok: boolean }>(
     args: string[],
     label: string,
@@ -519,11 +523,11 @@ export function createVercelRunner(options: {
       );
     },
     // No `--force`: if the variable exists after all, the CLI/API refuses instead of overwriting.
-    createVariable: (name, value) => write(value, ['env', 'add', name, 'production']),
-    // `--force` overwrites the Production record; the caller has proven it is a lone Production-only
+    createVariable: (name, value) => write(value, ['env', 'add', name, target]),
+    // `--force` overwrites the target record; the caller has proven it is a lone target-only
     // record in a project without custom environments. Nothing else is touched. Never `env rm`.
     updateVariable: (name, value) =>
-      write(value, ['env', 'add', name, 'production', '--force']),
+      write(value, ['env', 'add', name, target, '--force']),
   };
 }
 
@@ -545,37 +549,77 @@ export function assertEnvFileProtected(file: string, cwd: string): void {
 
 export type ProjectIdentity = { projectId: string; orgId: string };
 export type IdentityResult =
-  | { ok: true; identity: ProjectIdentity; notes: string[] }
+  | { ok: true; identity: ProjectIdentity; source: string; notes: string[] }
   | { ok: false; reason: string };
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{3,128}$/;
 
 /**
- * Which Vercel project would the CLI write to? `.vercel/project.json` is the link; the CLI also honours
+ * Which Vercel project would the CLI write to? The link is `.vercel/project.json` in older CLI
+ * versions and a root-directory entry in `.vercel/repo.json` in CLI 66.2.0. The CLI also honours
  * VERCEL_ORG_ID + VERCEL_PROJECT_ID from the environment, which silently win over the link. Any
  * disagreement between the two is an error, never a guess.
  */
 export function resolveProjectIdentity(cwd: string, env: NodeJS.ProcessEnv): IdentityResult {
-  const file = path.join(cwd, '.vercel', 'project.json');
-  if (!existsSync(file))
+  const legacyFile = path.join(cwd, '.vercel', 'project.json');
+  const repoFile = path.join(cwd, '.vercel', 'repo.json');
+  if (!existsSync(legacyFile) && !existsSync(repoFile))
     return {
       ok: false,
       reason: 'Project is not linked to Vercel: run `vercel link` first (this tool never links)',
     };
-  let link: unknown;
-  try {
-    link = JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    return { ok: false, reason: '.vercel/project.json is not valid JSON' };
+  const parseFile = (file: string): unknown => JSON.parse(readFileSync(file, 'utf8'));
+  const validIdentity = (projectId: unknown, orgId: unknown): projectId is string =>
+    typeof projectId === 'string' &&
+    typeof orgId === 'string' &&
+    ID_PATTERN.test(projectId) &&
+    ID_PATTERN.test(orgId);
+  let legacy: ProjectIdentity | undefined;
+  if (existsSync(legacyFile)) {
+    let parsed: unknown;
+    try {
+      parsed = parseFile(legacyFile);
+    } catch {
+      return { ok: false, reason: '.vercel/project.json is not valid JSON' };
+    }
+    const { projectId, orgId } = (parsed ?? {}) as Record<string, unknown>;
+    if (!validIdentity(projectId, orgId))
+      return { ok: false, reason: '.vercel/project.json has no valid projectId/orgId' };
+    legacy = { projectId, orgId: orgId as string };
   }
-  const { projectId, orgId } = (link ?? {}) as Record<string, unknown>;
+  let repository: ProjectIdentity | undefined;
+  if (existsSync(repoFile)) {
+    let parsed: unknown;
+    try {
+      parsed = parseFile(repoFile);
+    } catch {
+      return { ok: false, reason: '.vercel/repo.json is not valid JSON' };
+    }
+    const projects = (parsed as { projects?: unknown } | null)?.projects;
+    if (!Array.isArray(projects))
+      return { ok: false, reason: '.vercel/repo.json has no valid projects array' };
+    const root = path.resolve(cwd);
+    const matching = projects.filter(
+      (project): project is Record<string, unknown> =>
+        typeof project === 'object' &&
+        project !== null &&
+        typeof project.directory === 'string' &&
+        path.resolve(root, project.directory) === root,
+    );
+    if (matching.length !== 1)
+      return { ok: false, reason: '.vercel/repo.json must have exactly one project for this repository root' };
+    const { id, orgId } = matching[0];
+    if (!validIdentity(id, orgId))
+      return { ok: false, reason: '.vercel/repo.json root project has no valid id/orgId' };
+    repository = { projectId: id, orgId: orgId as string };
+  }
   if (
-    typeof projectId !== 'string' ||
-    typeof orgId !== 'string' ||
-    !ID_PATTERN.test(projectId) ||
-    !ID_PATTERN.test(orgId)
+    legacy && repository &&
+    (legacy.projectId !== repository.projectId || legacy.orgId !== repository.orgId)
   )
-    return { ok: false, reason: '.vercel/project.json has no valid projectId/orgId' };
+    return { ok: false, reason: '.vercel/project.json and .vercel/repo.json disagree; refusing to guess the target' };
+  const { projectId, orgId } = repository ?? legacy!;
+  const source = repository ? '.vercel/repo.json' : '.vercel/project.json';
 
   const notes: string[] = [];
   const envOrg = env.VERCEL_ORG_ID ?? env.NOW_ORG_ID;
@@ -585,13 +629,13 @@ export function resolveProjectIdentity(cwd: string, env: NodeJS.ProcessEnv): Ide
       return {
         ok: false,
         reason:
-          'VERCEL_ORG_ID / VERCEL_PROJECT_ID in the environment do not match .vercel/project.json ' +
+          `VERCEL_ORG_ID / VERCEL_PROJECT_ID in the environment do not match ${source} ` +
           '(the CLI would use the environment values): unset them or fix the link',
       };
     notes.push('VERCEL_ORG_ID / VERCEL_PROJECT_ID are set in the environment and match the link');
   }
   if (env.VERCEL_TOKEN) notes.push('VERCEL_TOKEN from the environment will authenticate the CLI');
-  return { ok: true, identity: { projectId, orgId }, notes };
+  return { ok: true, identity: { projectId, orgId }, source, notes };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -602,6 +646,7 @@ export type SyncOptions = {
   cwd: string;
   envFile: string;
   dryRun: boolean;
+  target?: SyncTarget;
   only?: string[];
   /** Required to touch REPORT_TOKEN_SECRET / CRON_SECRET (together with naming them in `only`). */
   allowRotation?: boolean;
@@ -613,7 +658,7 @@ export type SyncOptions = {
   /** Process environment used for identity checks and passed to the CLI; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
   /** Builds the Vercel runner; `secrets` lists every value that must be redacted from output. */
-  makeRunner: (context: { secrets: () => string[]; env: NodeJS.ProcessEnv }) => VercelRunner;
+  makeRunner: (context: { secrets: () => string[]; env: NodeJS.ProcessEnv; target: SyncTarget }) => VercelRunner;
   /** Must return true only after the operator typed exactly `phrase` in an interactive terminal. */
   confirm: (summary: string, phrase: string) => Promise<boolean>;
   log: (line: string) => void;
@@ -633,6 +678,7 @@ export type SyncResult = {
 
 export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const { cwd, envFile, log } = options;
+  const target = options.target ?? 'production';
   const baseEnv = options.env ?? process.env;
   const names = selectNames(options.only, options.allowRotation);
   const file = path.resolve(cwd, envFile);
@@ -641,10 +687,10 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
   const problems: string[] = [];
   const identityResult = resolveProjectIdentity(cwd, baseEnv);
-  log(`Source: ${path.relative(cwd, file)} (git-ignored)   Target: Vercel Production`);
+  log(`Source: ${path.relative(cwd, file)} (git-ignored)   Target: Vercel ${target}`);
   if (identityResult.ok) {
     log(
-      `Vercel project: projectId=${identityResult.identity.projectId} orgId=${identityResult.identity.orgId} (.vercel/project.json)`,
+      `Vercel project: projectId=${identityResult.identity.projectId} orgId=${identityResult.identity.orgId} (${identityResult.source})`,
     );
     for (const note of identityResult.notes) log(`  note: ${note}`);
   } else {
@@ -674,7 +720,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         VERCEL_PROJECT_ID: identityResult.identity.projectId,
       }
     : { ...baseEnv };
-  const runner = options.makeRunner({ secrets, env: childEnv });
+  const runner = options.makeRunner({ secrets, env: childEnv, target });
 
   let list: ProjectState;
   if (options.offline) list = { ok: false, reason: '--offline' };
@@ -692,7 +738,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
       problems.push(`existing variables not verified: ${list.reason}`);
   }
 
-  const plan = buildPlan(local, list, names);
+  const plan = buildPlan(local, list, names, target);
   log(formatPlan(plan));
   const todo = plan.filter((item) => item.operation !== 'skip' && item.operation !== 'blocked');
   const skipped = plan.filter((item) => item.operation === 'skip').map((item) => item.name);
@@ -719,7 +765,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     throw new Error(`Cannot verify existing variables (${list.reason}); nothing was written`);
   if (blocked.length)
     throw new Error(
-      `Refusing to apply: ${blocked.join(', ')} ambiguous in Production; nothing was written`,
+      `Refusing to apply: ${blocked.join(', ')} ambiguous in ${target}; nothing was written`,
     );
   if (todo.length === 0) {
     log('\nNothing to synchronize.');
@@ -730,11 +776,12 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   if (!identityResult.ok) throw new Error(identityResult.reason); // unreachable: checked above
   const { projectId, orgId } = identityResult.identity;
   const summary =
-    `${todo.length} variable(s) will be created or overwritten in Vercel PRODUCTION ` +
+    `${todo.length} variable(s) will be created or overwritten in Vercel ${target.toUpperCase()} ` +
     `(projectId ${projectId}, orgId ${orgId}). Other variables are untouched.` +
     (rotating ? '\nThis includes SECRETS THAT CHANGE LIVE BEHAVIOUR (see WARNING above).' : '');
-  if (!(await options.confirm(summary, rotating ? PHRASE_ROTATION : PHRASE_STANDARD))) {
-    log('\nNot confirmed: Production was not modified.');
+  const phrase = rotating ? `rotate ${target} secrets` : `sync ${target}`;
+  if (!(await options.confirm(summary, phrase))) {
+    log(`\nNot confirmed: ${target} was not modified.`);
     return { applied: [], skipped, blocked, problems, modified: false };
   }
 
@@ -743,7 +790,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const fresh = await readProjectState(runner);
   if (!fresh.ok)
     throw new Error(`Cannot re-verify existing variables (${fresh.reason}); nothing was written`);
-  const freshPlan = buildPlan(local, fresh, names);
+  const freshPlan = buildPlan(local, fresh, names, target);
   const signature = (items: readonly PlanItem[]) =>
     JSON.stringify(items.map((item) => [item.name, item.operation]));
   const todoNames = todo.map((item) => item.name);
@@ -758,7 +805,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const applied: string[] = [];
   for (const item of todo) {
     try {
-      // `create` never overwrites (no --force); only a confirmed Production-only `update` does.
+      // `create` never overwrites (no --force); only a confirmed target-only `update` does.
       if (item.operation === 'create') await runner.createVariable(item.name, local[item.name]);
       else if (item.operation === 'update')
         await runner.updateVariable(item.name, local[item.name]);
@@ -772,6 +819,6 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     }
   }
   log(`\nWrote ${applied.length} variable(s). NO deployment was triggered:`);
-  log('redeploy Production for the new values to take effect.');
+  log(`redeploy ${target} for the new values to take effect.`);
   return { applied, skipped, blocked, problems, modified: applied.length > 0 };
 }

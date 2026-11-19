@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +59,8 @@ async function ask(phrase, typed) {
 test('parseArgs reads every flag', () => {
   assert.deepEqual(parseArgs([]), {
     dryRun: false,
+    check: false,
+    target: 'production',
     offline: false,
     allowRotation: false,
     envFile: '.env',
@@ -78,6 +81,8 @@ test('parseArgs reads every flag', () => {
     ]),
     {
       dryRun: true,
+      check: false,
+      target: 'production',
       offline: true,
       allowRotation: true,
       envFile: 'x.env',
@@ -88,10 +93,73 @@ test('parseArgs reads every flag', () => {
   );
 });
 
+test('check reads Preview and Production without writing or asking for confirmation', async () => {
+  const ws = workspace();
+  const r = run(ws, ['--check'], { term: terminal({ stdinTty: false, stdoutTty: false }) });
+  assert.equal(await r.done, 0, r.err.join('\n'));
+  assert.equal(addCalls(ws).length, 0);
+  assert.equal(calls(ws).filter((call) => call.argv[1] === 'ls').length, 2);
+  assert.match(r.out.join('\n'), /Target: Vercel preview/);
+  assert.match(r.out.join('\n'), /Target: Vercel production/);
+  assertNoSecrets(assert, r.out.join('\n'));
+});
+
+test('Preview writes only Preview after a Preview-specific confirmation', async () => {
+  const ws = workspace();
+  const r = run(ws, ['--target', 'preview', '--expect-project', IDS.projectId]);
+  await prompted(r.term);
+  assert.match(r.term.printed(), /Type "sync preview"/);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 0, r.err.join('\n'));
+  assert.ok(addCalls(ws).length > 0);
+  assert.ok(addCalls(ws).every((call) => call.argv[3] === 'preview'));
+  assertNoSecrets(assert, r.out.join('\n') + r.term.printed());
+});
+
+test('Preview refuses a variable that already belongs to Production', async () => {
+  const ws = workspace();
+  const r = run(ws, ['--target', 'preview', '--expect-project', IDS.projectId], {
+    env: { FAKE_EXISTING: 'ANTHROPIC_API_KEY' },
+  });
+  assert.equal(await r.done, 1);
+  assert.equal(addCalls(ws).length, 0);
+  assert.match(r.err.join('\n'), /ambiguous in preview/);
+});
+
+test('CLI 66.2.0 repo.json link resolves from repository root and validates expected project', async () => {
+  const ws = workspace({ link: false });
+  const projectId = 'prj_vzVJy88okxdhvkpMiQJzbinudlid';
+  mkdirSync(path.join(ws.dir, '.vercel'));
+  writeFileSync(
+    path.join(ws.dir, '.vercel', 'repo.json'),
+    JSON.stringify({
+      remoteName: 'origin',
+      projects: [{ id: projectId, name: 'ai-report-feedback', directory: '.', orgId: IDS.orgId }],
+    }),
+  );
+  const wrong = run(ws, ['--target', 'preview', '--expect-project', IDS.projectId]);
+  assert.equal(await wrong.done, 1);
+  assert.match(wrong.err.join('\n'), /does not match the linked Vercel project/);
+  assert.equal(calls(ws).length, 0);
+
+  const right = run(ws, ['--target', 'preview', '--expect-project', projectId]);
+  await prompted(right.term);
+  right.term.answer('no');
+  assert.equal(await right.done, 0, right.err.join('\n'));
+  assert.match(right.out.join('\n'), new RegExp(projectId));
+  assert.match(right.out.join('\n'), /\.vercel\/repo\.json/);
+  assert.equal(addCalls(ws).length, 0);
+});
+
 test('parseArgs rejects unknown options and missing values, including a flag used as a value', () => {
   assert.throws(() => parseArgs(['--bogus']), /Unknown option: --bogus/);
   assert.throws(() => parseArgs(['--yes']), /Unknown option/); // there is no non-interactive bypass
   assert.throws(() => parseArgs(['--force']), /Unknown option/);
+  assert.throws(
+    () => parseArgs(['--target', 'preview', '--target', 'production']),
+    /only be specified once/,
+  );
+  assert.throws(() => parseArgs(['--check', '--target', 'preview']), /compares both targets/);
   for (const flag of ['--env-file', '--only', '--expect-project', '--expect-org']) {
     assert.throws(() => parseArgs([flag]), /needs a value/, flag);
     assert.throws(() => parseArgs([flag, '--dry-run']), /needs a value/, flag);

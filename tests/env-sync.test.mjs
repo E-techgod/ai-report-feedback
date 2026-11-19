@@ -80,6 +80,26 @@ test('default sync excludes the opt-in secrets; the allowlist never contains for
   assert.ok(!selectNames(undefined).includes('CRON_SECRET'));
 });
 
+test('Preview classification updates only a lone Preview record', () => {
+  const preview = [
+    {
+      key: 'X',
+      targets: ['preview'],
+      gitBranch: null,
+      customEnvironmentIds: [],
+      createdAt: null,
+      updatedAt: null,
+    },
+  ];
+  assert.deepEqual(classifyVariable('X', preview, 0, 'preview'), { kind: 'update' });
+  assert.equal(classifyVariable('X', preview, 0, 'production').kind, 'blocked');
+  assert.equal(
+    classifyVariable('X', [{ ...preview[0], targets: ['preview', 'production'] }], 0, 'preview')
+      .kind,
+    'blocked',
+  );
+});
+
 test('forbidden names are rejected even with the rotation flag', () => {
   for (const name of [
     'REPORT_EMAIL_ENABLED',
@@ -249,7 +269,7 @@ test('redaction ignores short and generic values so ordinary messages are not ma
 test('identity resolves from the link and reports env overrides', () => {
   const ws = workspace();
   const ok = resolveProjectIdentity(ws.dir, {});
-  assert.deepEqual(ok, { ok: true, identity: IDS, notes: [] });
+  assert.deepEqual(ok, { ok: true, identity: IDS, source: '.vercel/project.json', notes: [] });
   const same = resolveProjectIdentity(ws.dir, {
     VERCEL_ORG_ID: IDS.orgId,
     VERCEL_PROJECT_ID: IDS.projectId,
@@ -258,6 +278,23 @@ test('identity resolves from the link and reports env overrides', () => {
   assert.equal(same.ok, true);
   assert.equal(same.notes.length, 2);
   assert.doesNotMatch(JSON.stringify(same), /"tok"/);
+});
+
+test('repo.json rejects ambiguous root links and disagreement with project.json', () => {
+  const ws = workspace();
+  const repoFile = path.join(ws.dir, '.vercel', 'repo.json');
+  const entry = { id: IDS.projectId, name: 'ai-report-feedback', directory: '.', orgId: IDS.orgId };
+  writeFileSync(repoFile, JSON.stringify({ remoteName: 'origin', projects: [entry] }));
+  assert.equal(resolveProjectIdentity(ws.dir, {}).source, '.vercel/repo.json');
+
+  writeFileSync(repoFile, JSON.stringify({ projects: [{ ...entry, id: 'prj_other' }] }));
+  assert.match(resolveProjectIdentity(ws.dir, {}).reason, /disagree/);
+
+  writeFileSync(repoFile, JSON.stringify({ projects: [entry, entry] }));
+  assert.match(resolveProjectIdentity(ws.dir, {}).reason, /exactly one project/);
+
+  writeFileSync(repoFile, JSON.stringify({ projects: [{ ...entry, directory: 'subdir' }] }));
+  assert.match(resolveProjectIdentity(ws.dir, {}).reason, /exactly one project/);
 });
 
 test('identity fails on missing, malformed or conflicting configuration', () => {

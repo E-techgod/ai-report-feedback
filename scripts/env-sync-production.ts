@@ -1,5 +1,5 @@
 /**
- * Synchronize an allowlist of variables from the local `.env` to Vercel PRODUCTION.
+ * Synchronize an allowlist of variables from the local `.env` to one Vercel environment.
  *
  *   npm run env:sync:production -- --dry-run
  *       names, operations and the resolved Vercel project; modifies nothing
@@ -19,10 +19,12 @@
  * stdin only; they are never printed. No deployment is triggered. See README "Environment sync".
  */
 import readline from 'node:readline/promises';
-import { createVercelRunner, runSync } from './lib/env-sync';
+import { createVercelRunner, runSync, type SyncTarget } from './lib/env-sync';
 
 export type Args = {
   dryRun: boolean;
+  check: boolean;
+  target: SyncTarget;
   offline: boolean;
   allowRotation: boolean;
   envFile: string;
@@ -32,15 +34,35 @@ export type Args = {
 };
 
 export const USAGE =
-  'Usage: npm run env:sync:production -- [--dry-run] [--expect-project <projectId>] [--expect-org <orgId>] ' +
+  'Usage: npm run env:check | npm run env:sync:preview | npm run env:sync:production -- ' +
+  '[--target preview|production] [--dry-run] [--expect-project <projectId>] [--expect-org <orgId>] ' +
   '[--only A,B] [--allow-secret-rotation] [--offline] [--env-file <path>]';
 
 export function parseArgs(argv: string[]): Args {
-  const args: Args = { dryRun: false, offline: false, allowRotation: false, envFile: '.env' };
+  const args: Args = {
+    dryRun: false,
+    check: false,
+    target: 'production',
+    offline: false,
+    allowRotation: false,
+    envFile: '.env',
+  };
+  let targetSeen = false;
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--dry-run') args.dryRun = true;
-    else if (flag === '--offline') args.offline = true;
+    else if (flag === '--check') {
+      args.check = true;
+      args.dryRun = true;
+    }
+    else if (flag === '--target') {
+      if (targetSeen) throw new Error('--target may only be specified once');
+      targetSeen = true;
+      const value = argv[(i += 1)];
+      if (value !== 'preview' && value !== 'production')
+        throw new Error(`--target must be preview or production\n${USAGE}`);
+      args.target = value;
+    } else if (flag === '--offline') args.offline = true;
     else if (flag === '--allow-secret-rotation') args.allowRotation = true;
     else if (
       flag === '--env-file' ||
@@ -60,6 +82,7 @@ export function parseArgs(argv: string[]): Args {
           .filter(Boolean);
     } else throw new Error(`Unknown option: ${flag}\n${USAGE}`);
   }
+  if (args.check && targetSeen) throw new Error('--check compares both targets; omit --target');
   return args;
 }
 
@@ -108,21 +131,27 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     const env = deps.env ?? process.env;
     const io = deps.io ?? { stdin: process.stdin, stdout: process.stdout };
     const bin = env.VERCEL_BIN || 'vercel';
-    const result = await runSync({
+    const runTarget = (target: SyncTarget) => runSync({
       cwd,
       env,
       envFile: args.envFile,
       dryRun: args.dryRun,
+      target,
       offline: args.offline,
       only: args.only,
       allowRotation: args.allowRotation,
       expectProject: args.expectProject,
       expectOrg: args.expectOrg,
-      makeRunner: ({ secrets, env: childEnv }) =>
-        createVercelRunner({ bin, cwd, env: childEnv, secrets }),
+      makeRunner: ({ secrets, env: childEnv, target: selectedTarget }) =>
+        createVercelRunner({ bin, cwd, env: childEnv, secrets, target: selectedTarget }),
       confirm: createConfirm(io),
       log,
     });
+    if (args.check) {
+      const results = [await runTarget('preview'), await runTarget('production')];
+      return results.some((result) => result.problems.length > 0) ? 1 : 0;
+    }
+    const result = await runTarget(args.target);
     // A dry run that reveals an apply would be refused must not look like a clean success.
     return args.dryRun && result.problems.length > 0 ? 1 : 0;
   } catch (caught) {

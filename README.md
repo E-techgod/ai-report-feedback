@@ -46,33 +46,36 @@ One **finalized report** is built on the server per submission, stored in Postgr
 
 Setup: create a Neon database, set the variables in `.env.example`, then run `npm run db:migrate` once.
 
-## Environment sync (local `.env` → Vercel Production)
+## Environment sync (local `.env` → Vercel Preview or Production)
 
-`npm run env:sync:production` copies an explicit allowlist of variables from your local `.env` to Vercel **Production** using the official Vercel CLI. It never deploys.
+The local `.env` is the source for the explicit allowlist below. The workflow uses the official Vercel CLI, handles Preview and Production independently, and never deploys or deletes variables.
 
 **One-time setup:** `npm i -g vercel`, `vercel login`, then `vercel link` in this folder (creates the git-ignored `.vercel/`). Set `VERCEL_BIN` if the CLI is not on your `PATH`. Needs a CLI recent enough to support `vercel env ls --format json` and `vercel api` (used read-only to list custom environments; if your CLI cannot run it, applies are refused rather than guessed).
 
 ```bash
-npm run env:sync:production -- --dry-run          # project, names + operations; modifies nothing
-npm run env:sync:production -- --expect-project prj_xxx   # shows the plan, then asks you to type the phrase
+npm run env:check                                  # read-only plans for Preview and Production
+npm run env:sync:preview -- --expect-project prj_xxx     # Preview only; type "sync preview"
+npm run env:sync:production -- --expect-project prj_xxx  # Production only; type "sync production"
+npm run env:sync:preview -- --dry-run                    # read-only Preview plan
 npm run env:sync:production -- --only EMAIL_FROM,RESEND_API_KEY --expect-project prj_xxx
 ```
 
-Always run `--dry-run` first: it prints the resolved `projectId` / `orgId` (from `.vercel/project.json`). An apply **requires** `--expect-project <that projectId>` (and optionally `--expect-org`), so a checkout linked to the wrong project cannot be written to by accident. The dry run exits 1 whenever an apply would be refused.
+Run `env:check` first: it prints the resolved `projectId` / `orgId` (from `.vercel/repo.json` in Vercel CLI 66.2.0, or `.vercel/project.json` in older links), names, and `create`, `update`, `skip`, or `blocked` for each target. `update` means an existing target-only record would be overwritten; the CLI does not reveal its value, so the check cannot tell whether the value already matches `.env`. The check never writes and exits 1 whenever an apply would be refused. An apply **requires** `--expect-project <that projectId>` (and optionally `--expect-org`) and an interactive confirmation.
 
 Other options: `--offline` (dry run without calling the CLI) and `--env-file <path>`.
 
 ### What it does
 
 - **Default allowlist:** `GOOGLE_SHEET_ID`, `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, `APP_URL`, `NEXT_PUBLIC_BOOKING_URL` (list in `scripts/lib/env-sync.ts`). Missing or empty local values are skipped, never written as blanks.
-- **Opt-in secrets:** `REPORT_TOKEN_SECRET` and `CRON_SECRET` are **not** part of a default run. They need `--only <name> --allow-secret-rotation`, print a warning, and require the phrase `rotate production secrets` instead of `sync production`.
+- **Opt-in secrets:** `REPORT_TOKEN_SECRET` and `CRON_SECRET` are **not** part of a default run. They need `--only <name> --allow-secret-rotation`, print a warning, and require `rotate preview secrets` or `rotate production secrets` for the selected target.
   - Replacing `REPORT_TOKEN_SECRET` invalidates every previously issued report link and download.
   - `CRON_SECRET` has no separate cron-side setting: Vercel sends the project's `CRON_SECRET` as the `Authorization: Bearer` header of cron requests (`vercel.json` only holds the path and schedule), and `/api/cron/retry-emails` rejects any other bearer. A new value takes effect with the next deployment.
-- **Never synced, on purpose:** `REPORT_EMAIL_ENABLED` (the email master switch is flipped deliberately in the Vercel dashboard, never as a side effect of copying a file), `DATABASE_URL*` (owned by the Neon integration) and the legacy `GOOGLE_SHEETS_WEBHOOK_*`. Asking for one with `--only` is an error, with or without the rotation flag.
+- **Never synced, on purpose:** `REPORT_EMAIL_ENABLED` and `REPORT_EMAIL_ALLOWLIST` (delivery controls managed in the Vercel dashboard), `DATABASE_URL*` (owned by the Neon integration), and the legacy `GOOGLE_SHEETS_WEBHOOK_*`. Asking for one with `--only` is an error.
 - **Create or update, failing closed:** the tool lists the project's variables (`vercel env ls --format json`; malformed or unexpected output is an error) and reads the project's **custom environments** (`vercel api /v9/projects/<projectId>/custom-environments`). It then writes a variable only in two cases:
-  - **create** — the variable is absent from the listing. Run as `vercel env add NAME production` with **no `--force`**, so the CLI does not ask the API to upsert.
-  - **update** — exactly one Production-only record, no branch scope, and **the project has no custom environments**. Run as `vercel env add NAME production --force`, the only place `--force` is used.
-  - Anything else is `blocked` (shared with Preview/Development, split across records, branch-scoped, or a custom environment exists) and the whole apply is refused with nothing written. If the listing or the custom-environment read fails, an apply is refused too. Nothing is ever removed, so unrelated variables are untouched.
+  - **create** — the variable is absent from the listing. Run as `vercel env add NAME <target>` with **no `--force`**, so the CLI does not ask the API to upsert.
+  - **update** — exactly one record for the selected target only, no branch scope, and **the project has no custom environments**. Run as `vercel env add NAME <target> --force`, the only place `--force` is used.
+  - Anything else is `blocked` (shared with another environment, split across records, branch-scoped, or a custom environment exists) and the whole apply is refused with nothing written. If the listing or the custom-environment read fails, an apply is refused too. Nothing is ever removed, so unrelated variables are untouched.
+  - A variable that already exists only in Production is also blocked when syncing Preview, and vice versa. Split or add the target-specific record in the Vercel dashboard, then rerun the check.
 - **What actually protects you, and what only might.** The CLI's JSON listing is lossy: it contains `key`, `target`, `gitBranch`, `type`, `visibility`, `createdAt` and `updatedAt`, but **not** `customEnvironmentIds`, `hiddenProductionEnvCount` or pagination data, which the underlying API can return. So:
   - _Works with the real CLI output:_ the `target` / `gitBranch` / duplicate-record classification; the custom-environment count read through `vercel api` (a custom environment anywhere blocks every update, because `target: ["production"]` does not prove "Production only"); the create-without-`--force` rule; the plan re-check after you confirm; stdin-only values and redaction.
   - _Theoretical only:_ the checks that reject a listing declaring `hiddenProductionEnvCount` ≠ 0, a `pagination.next` cursor, or a record carrying `customEnvironmentIds`. They only fire if some future CLI version starts emitting those fields; **they do not protect a run today** and nothing relies on them.
@@ -82,7 +85,7 @@ Other options: `--offline` (dry run without calling the CLI) and `--env-file <pa
 - **No secret exposure:** values reach the CLI through its **stdin**, never argv, a shell command, a log or the plan (which shows `<hidden>`). The `.env` is not loaded into the process environment, and all CLI output is redacted (plain, JSON-escaped, URL-encoded, base64, per-line and embedded-password forms of every local value of 8+ characters) before it is printed. The CLI child is pinned to the displayed project via `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID`; a conflicting value for either in your shell is an error.
 - **Confirmation:** applying requires typing the exact phrase in an interactive terminal (stdin **and** stdout must be TTYs); piped or CI runs are refused, and there is no `--yes`. A dry run never writes.
 - **Protected source:** the run aborts if the env file is tracked by git or not git-ignored. `.gitignore` ignores `.env` and every `.env.*` variant (`.env.local`, `.env.production`, …) except the `.env.example` template, plus `.vercel/`, `.neon` and `*.pem`.
-- **No deployment:** Vercel applies new values only to the next deployment, so **redeploy Production afterwards**. `NEXT_PUBLIC_BOOKING_URL` is inlined at build time.
+- **No deployment:** Vercel applies new values only to the next deployment, so redeploy the selected target afterwards. `NEXT_PUBLIC_BOOKING_URL` is inlined at build time.
 - **If a write fails** the run stops, names the variables already written, and exits non-zero; re-running is safe because writes are idempotent.
 
 ### Not yet verified against a real Vercel CLI
