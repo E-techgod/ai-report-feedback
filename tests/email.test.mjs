@@ -9,6 +9,8 @@ import {
   pdfFilename,
   verifyWebhookSignature,
 } from '../src/lib/email.ts';
+import { buildReportContent } from '../src/lib/report-content.ts';
+import { questionIds } from '../src/lib/questions.ts';
 import { sampleReport } from './helpers/fixtures.mjs';
 
 const message = {
@@ -32,14 +34,13 @@ function mailer(handler) {
   };
 }
 
-test('email carries name, score, level, summary, booking link and the PDF attachment', async () => {
+test('email carries name, score, level, booking link and the PDF attachment', async () => {
   const report = sampleReport({ source: 'ai' });
   const { subject, html, text } = buildEmail(report, { siteUrl: 'https://app.example.com/' });
   for (const part of [
     report.firstName,
     `${report.model.score.protection}%`,
     report.model.level,
-    report.narrative.executiveSummary,
     report.bookingUrl,
   ]) {
     assert.ok(html.includes(part), `html missing ${part}`);
@@ -54,6 +55,60 @@ test('email carries name, score, level, summary, booking link and the PDF attach
   assert.equal(calls[0].body.attachments[0].content, Buffer.from('%PDF').toString('base64'));
   assert.equal(calls[0].init.headers['idempotency-key'], 'report-email/abc');
   assert.equal(calls[0].init.headers.authorization, 'Bearer k');
+});
+
+function plain(html) {
+  return html
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/\s+/g, ' ');
+}
+
+test('email is a concise summary: finding, priority area and next step come from the top stored priority', () => {
+  const report = sampleReport({ source: 'ai' });
+  const top = buildReportContent(report).priorities.items[0];
+  assert.ok(top, 'fixture must have a priority');
+  const { html, text } = buildEmail(report, { attachmentName: 'Informe.pdf' });
+  const flat = plain(html);
+  for (const [label, value] of [
+    ['Tu principal hallazgo:', top.finding],
+    ['Área prioritaria:', top.title],
+    ['Siguiente paso:', top.action],
+  ]) {
+    assert.ok(flat.includes(`${label} ${value}`), `html missing "${label} ${value}"`);
+    assert.ok(text.includes(`${label} ${value}`), `text missing "${label} ${value}"`);
+  }
+  // Greeting, attachment notice and appointment invitation, in both versions.
+  for (const part of [`Hola, ${report.firstName}:`, 'Tu informe completo está adjunto']) {
+    assert.ok(flat.includes(part), `html missing ${part}`);
+    assert.ok(text.includes(part), `text missing ${part}`);
+  }
+  assert.ok(flat.includes('Informe.pdf') && text.includes('Informe.pdf'));
+  assert.ok(html.includes(`href="${report.bookingUrl}"`));
+  assert.ok(text.includes(`Agenda una asesoría con Quirón: ${report.bookingUrl}`));
+  // Concise: only the top priority, not the full priority list or the 5-step plan.
+  const second = buildReportContent(report).priorities.items[1];
+  if (second) assert.ok(!text.includes(second.finding));
+  assert.ok(text.length < 1800, `plain text should stay short, was ${text.length}`);
+});
+
+test('email never claims AI authorship, for AI-written and for template reports', () => {
+  for (const source of ['ai', 'template']) {
+    const { html, text } = buildEmail(sampleReport({ source }));
+    for (const body of [plain(html), text]) {
+      assert.doesNotMatch(body, /inteligencia artificial|\bIA\b|Claude|redactad[oa] con/i, source);
+    }
+  }
+});
+
+test('with no weak areas the email uses the report\'s own "nothing to strengthen" message', () => {
+  const report = sampleReport({ yes: questionIds });
+  const c = buildReportContent(report);
+  assert.equal(c.priorities.items.length, 0);
+  const { html, text } = buildEmail(report);
+  assert.ok(text.includes(`Tu principal hallazgo: ${c.priorities.empty.title}`));
+  assert.ok(text.includes(`Siguiente paso: ${c.priorities.empty.text}`));
+  assert.ok(!text.includes('Área prioritaria:') && !html.includes('Área prioritaria:'));
 });
 
 test('email escapes HTML in user-controlled names and omits the button without a booking URL', () => {

@@ -12,6 +12,9 @@ import {
   publicEmailStatus,
 } from '../src/lib/pipeline.ts';
 import { fallbackNarrative } from '../src/lib/report.ts';
+import { extractText, getDocumentProxy } from 'unpdf';
+import { renderReportPdf } from '../src/lib/pdf/ReportPdf.tsx';
+import { buildReportContent } from '../src/lib/report-content.ts';
 import { answersOf } from './helpers/fixtures.mjs';
 import { harness, submission } from './helpers/pipeline-harness.mjs';
 
@@ -30,7 +33,8 @@ test('success: one report, one email to the stored address with the PDF attached
   assert.equal(h.sent[0].to, 'ana.perez@example.com');
   assert.equal(h.sent[0].attachments[0].content.toString(), '%PDF-fake');
   assert.match(h.sent[0].attachments[0].filename, /^Diagnostico-Patrimonial-Quiron-Ana\.pdf$/);
-  assert.ok(h.sent[0].html.includes('Texto redactado por Claude.'));
+  // The email is a concise summary: the long AI-written text lives in the attached PDF only.
+  assert.ok(!h.sent[0].html.includes('Texto redactado por Claude.'));
   const after = await store.getById(record.id);
   assert.equal(after.emailStatus, 'accepted');
   assert.equal(after.emailProviderMessageId, 'em_1');
@@ -289,4 +293,45 @@ test('a recipient address cannot be used to request unlimited reports', async ()
     submission({ answers: answersOf(Object.keys(answersOf([])).slice(0, 1)) }),
   );
   assert.equal(again.created, false);
+});
+
+test('score, level, finding, action and PDF attachment all come from the SAME stored report', async () => {
+  const h = harness();
+  const { store, deps } = await h.build();
+  deps.renderPdf = renderReportPdf; // the real renderer, as in production
+  const { record } = await createReport(deps, submission());
+  const narrativeCallsBefore = h.narrativeCalls.length;
+  assert.equal((await deliverReportEmail(deps, record.id)).outcome, 'accepted');
+  assert.equal(
+    h.narrativeCalls.length,
+    narrativeCallsBefore,
+    'sending never regenerates the report',
+  );
+
+  const stored = (await store.getById(record.id)).report;
+  const c = buildReportContent(stored);
+  const top = c.priorities.items[0];
+  const [mail] = h.sent;
+  const htmlText = mail.html
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/\s+/g, ' ');
+  const norm = (v) => v.replace(/\s+/g, '').toLowerCase();
+  const pdf = await getDocumentProxy(new Uint8Array(mail.attachments[0].content));
+  const pdfText = norm((await extractText(pdf, { mergePages: true })).text);
+  assert.equal(mail.attachments[0].content.subarray(0, 5).toString(), '%PDF-');
+
+  for (const fact of [
+    c.hero.score.value,
+    c.hero.score.levelLabel,
+    top.title,
+    top.finding,
+    top.action,
+  ]) {
+    assert.ok(mail.text.includes(fact), `email text missing: ${fact}`);
+    assert.ok(htmlText.includes(fact), `email html missing: ${fact}`);
+    assert.ok(pdfText.includes(norm(fact)), `attached PDF missing: ${fact}`);
+  }
+  assert.ok(mail.text.includes(mail.attachments[0].filename), 'email names the attached file');
+  assert.ok(mail.html.includes(`href="${stored.bookingUrl}"`));
 });
