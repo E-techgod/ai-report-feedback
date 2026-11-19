@@ -121,6 +121,123 @@ test('email escapes HTML in user-controlled names and omits the button without a
   assert.match(html, /no está disponible/);
 });
 
+test('redesigned email follows the report structure and takes every value from the stored report', () => {
+  const report = sampleReport({ source: 'ai' });
+  const c = buildReportContent(report);
+  const { html } = buildEmail(report, {
+    siteUrl: 'https://app.example.com',
+    attachmentName: 'Informe.pdf',
+  });
+  const flat = plain(html);
+  const order = [
+    'quiron-logo.png',
+    c.brand,
+    c.hero.title,
+    `Hola, ${report.firstName}:`,
+    c.hero.score.label,
+    c.hero.score.value,
+    c.hero.score.levelLabel,
+    c.hero.weak.label,
+    `${c.hero.weak.value} ${c.hero.weak.of}`,
+    'Tu principal hallazgo:',
+    'Área prioritaria:',
+    'Siguiente paso:',
+    'Agendar asesoría personalizada',
+    'Tu informe completo está adjunto',
+    'Informe.pdf',
+    c.legal,
+  ];
+  let at = -1;
+  for (const part of order) {
+    const found = (part.endsWith('.png') ? html : flat).indexOf(
+      part,
+      part.endsWith('.png') ? 0 : at + 1,
+    );
+    assert.ok(found >= 0, `missing or out of order: ${part}`);
+    if (!part.endsWith('.png')) at = found;
+  }
+  // The web report's palette: black / dark grays / white / orange, and the stored percentage.
+  for (const color of [
+    '#000000',
+    '#16171a',
+    '#1d1e22',
+    '#34363c',
+    '#a1a4ad',
+    '#d95d1e',
+    '#ffffff',
+  ]) {
+    assert.ok(html.includes(color), `palette colour ${color} missing`);
+  }
+  assert.ok(html.includes(`width="${report.model.score.protection}%"`));
+  assert.ok(html.includes(`href="${report.bookingUrl}"`));
+});
+
+test('email html is email-safe: table layout, inline styles, no scripts, flex/grid or remote CSS', () => {
+  const { html } = buildEmail(sampleReport({ source: 'ai' }), { siteUrl: 'https://a.example' });
+  assert.match(html, /^<!doctype html>/i);
+  assert.match(html, /<meta name="viewport"/);
+  assert.match(html, /@media only screen and \(max-width:620px\)/);
+  assert.ok(html.length < 100_000, 'Gmail clips messages over ~102KB');
+  assert.doesNotMatch(
+    html,
+    /<script|<link|@import|display:\s*(flex|grid)|position:\s*(absolute|fixed)|var\(--/i,
+  );
+  assert.doesNotMatch(html, /url\(/i);
+  assert.equal([...html.matchAll(/<img /g)].length, 1);
+  assert.match(html, /<img [^>]*alt="Quirón/);
+  assert.match(html, /<table role="presentation"/);
+});
+
+test('every user-controlled value is escaped, including the attachment name and booking URL', () => {
+  const evil = '"><img src=x onerror=alert(1)>';
+  const report = {
+    ...sampleReport({ bookingUrl: `https://e.example/?a=1&b="${evil}` }),
+    firstName: evil,
+  };
+  const { html } = buildEmail(report, {
+    siteUrl: `https://a.example/${evil}`,
+    attachmentName: `${evil}.pdf`,
+  });
+  assert.doesNotMatch(html, /<img src=x|onerror=alert\(1\)>|"><img/);
+  assert.ok(html.includes('&#60;img src=x onerror=alert(1)&#62;'));
+});
+
+test('missing or extreme fields never break the layout', () => {
+  const base = sampleReport({ source: 'ai' });
+  // no logo origin: text wordmark instead of a broken image
+  const noLogo = buildEmail(base).html;
+  assert.ok(!noLogo.includes('<img') && noLogo.includes('QUIRÓN'));
+  // empty first name falls back like the subject does
+  const noName = buildEmail({ ...base, firstName: '' });
+  assert.ok(noName.html.includes('Hola, cliente:'));
+  // no booking URL: no link at all, only the report's own note
+  const noUrl = buildEmail({ ...base, bookingUrl: null }).html;
+  assert.ok(!noUrl.includes('href=') && !noUrl.includes('Agendar asesoría personalizada'));
+  // the progress bar never leaves 0-100 or renders a NaN width: [stored value, fill %, track %]
+  for (const [protection, fill, track] of [
+    [0, null, 100],
+    [64, 64, 36],
+    [100, 100, null],
+    [140, 100, null],
+    [-5, null, 100],
+    [Number.NaN, null, 100],
+  ]) {
+    const score = { ...base.model.score, protection };
+    const { html: bar } = buildEmail({ ...base, model: { ...base.model, score } });
+    assert.doesNotMatch(bar, /width="(NaN|-)/);
+    const fillCell = bar.match(/<td width="(\d+)%" bgcolor="#d95d1e"/);
+    const trackCell = bar.match(/<td width="(\d+)%" bgcolor="#34363c"/);
+    assert.equal(fillCell && Number(fillCell[1]), fill, `fill for ${protection}`);
+    assert.equal(trackCell && Number(trackCell[1]), track, `track for ${protection}`);
+  }
+  // long unbroken text wraps instead of widening the table
+  const long = { ...base, firstName: 'A'.repeat(100) };
+  const { html } = buildEmail(long, { attachmentName: `${'B'.repeat(120)}.pdf` });
+  assert.ok(html.includes('A'.repeat(100)) && html.includes('B'.repeat(120)));
+  assert.ok(html.split('overflow-wrap:anywhere').length > 6);
+  assert.doesNotMatch(html, /white-space:\s*nowrap/);
+});
+
 test('pdf filename is ASCII-safe', () => {
   assert.equal(pdfFilename('José Ángel'), 'Diagnostico-Patrimonial-Quiron-Jose-Angel.pdf');
   assert.equal(pdfFilename(''), 'Diagnostico-Patrimonial-Quiron.pdf');
