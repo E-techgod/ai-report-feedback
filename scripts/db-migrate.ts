@@ -9,9 +9,11 @@
 import { readFileSync } from 'node:fs';
 import { neon } from '@neondatabase/serverless';
 
-const url = process.env.DATABASE_URL;
+// Migrations use the DIRECT (non-pooled) connection when available: the pooler runs in transaction
+// mode and does not support session-level operations. Falls back to DATABASE_URL.
+const url = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
 if (!url) {
-  console.error('DATABASE_URL is not set');
+  console.error('DATABASE_URL_UNPOOLED / DATABASE_URL is not set');
   process.exit(1);
 }
 const client = neon(url);
@@ -24,7 +26,15 @@ const statements = schema
   .map((s) => s.trim())
   .filter(Boolean);
 
-for (const statement of statements) {
-  await client.query(statement);
+// Wrapped in main(): tsx compiles scripts as CommonJS, which has no top-level await.
+async function main() {
+  for (const statement of statements) {
+    await client.query(statement);
+  }
+  console.log(`Applied ${statements.length} statements.`);
 }
-console.log(`Applied ${statements.length} statements.`);
+
+main().catch((error) => {
+  console.error('Migration failed:', error instanceof Error ? error.message : error);
+  process.exit(1);
+});
