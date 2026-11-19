@@ -1,8 +1,9 @@
 # Sheet tracking and legacy email cutover (prepared, not activated)
 
-This branch is based on `main`. Draft PR #6, including commit `83e55cc`, remains open and supplies
-the concise Resend email and the full legacy migration analysis in `docs/report-email.md`. Merge or
-rebase that PR separately; this branch does not copy its email content changes.
+PR #6 (including commit `83e55cc`) merged into `main` first. PR #7 now incorporates that merged
+email summary and its tests while keeping the Sheet tracking and cutover safeguards. The recommended
+code merge order is satisfied: #6, then #7 after the release gates below. Neither PR's merge
+activates the legacy migration by itself; `REPORT_EMAIL_ENABLED=false` remains the default.
 
 ## Live header audit (read-only, 18 November 2026)
 
@@ -21,7 +22,8 @@ formula, and ownership before implementing counters. The app does not add column
 `Estado Descarga CSV` and its date remain untouched because the app has no CSV download route.
 
 The Dashboard score formula now references `P:AI`, so it follows the shifted questions. **Deployment
-risk:** current `main` (commit `b9a99c5`) still appends exactly 24 values into `A:X`, with answers
+risk:** current `main` (merge commit `51ea080`, retaining the writer from `b9a99c5`) still appends
+exactly 24 values into `A:X`, with answers
 starting at `E`. Against the observed live 35-column Sheet, that places answer values in report/email
 tracking fields `E:O`, only partially fills the real questions `P:AI`, and reads the wrong cells for
 duplicate detection. This is a code and schema mismatch, not proof of a particular production
@@ -58,6 +60,12 @@ Sheet projection runs after the HTTP response with an eight-second request budge
 `Fecha Envío` means Resend accepted the message, while
 `Estado Email=Entregado` requires its signed webhook. `Descarga iniciada` means the PDF was rendered
 for an authorized HTTP response; the server cannot prove the browser saved the file.
+PDF download tracking is persisted in Neon before the PDF response; its Sheet projection runs after
+the response. Resend webhook events are persisted before acknowledgment, and their Sheet projection
+runs after acknowledgment. The daily cron sends within a 25-second email budget without per-email
+Sheet calls, then uses a separate tracking window capped by an absolute 52-second work deadline.
+The 60-second route leaves eight seconds for cleanup and response, though one slow in-flight send
+can overrun its soft email budget. Throughput under real PDF/Resend latency has not been measured.
 
 ## Migration artifacts and order
 
@@ -121,6 +129,10 @@ for an authorized HTTP response; the server cannot prove the browser saved the f
   delivery cannot be ruled out until the manual audit and kill switch are complete.
 - Run the database migration before deploying this branch; the new store queries require the added
   columns. No migration or production deployment was performed here.
+- Verify whether merging to `main` automatically deploys production. If it does, approve and run the
+  idempotent production database migration before merging PR #7, then confirm the deployment and
+  header-mapped writer. The old `main` writer remains a live misalignment risk until deployment is
+  verified; pause or reroute submissions through an approved process if it is active.
 - The live Sheet copy check was not run. Automatic approval review rejected copying the production
   response Sheet because it would replicate respondent data into a new Drive file. Use an explicitly
   approved isolated dataset for the real Sheets API `updatedCells` check before release.

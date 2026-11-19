@@ -79,10 +79,11 @@ anywhere inside that hour). The endpoint path and its `CRON_SECRET` bearer check
 - **Skipped or very late runs.** If a run is skipped, a report created just after the previous run is
   reached only by the run two days later (≈48 h), which is past the window. It is then finalized as
   failed and **not sent**. A run that is merely late (still inside 47 h) recovers it normally.
-- **Backlog.** A sweep first finalizes expired reports, then processes _everything_ that is due in
-  batches of 25 until its 45 s budget is spent (the function limit is 60 s). On Hobby that is an
-  estimated 25–30 emails per run (about 1.5–2 s each for the PDF render plus the provider call; not measured); a large outage backlog could outlast the
-  window. See "Architectural notes".
+- **Backlog.** The cron first finalizes expired reports, then processes due emails in batches of 25
+  for up to 25 s. A send already in flight can exceed that soft deadline (Resend's request timeout
+  alone is 20 s). Sheet projection has a separate 12 s window, capped by an absolute 52 s work
+  deadline in the 60 s route, leaving eight seconds for cleanup and response. Real PDF/Resend
+  throughput is unmeasured; a large outage backlog may outlast the 47 h retry window.
 
 ### What the customer sees
 
@@ -116,7 +117,7 @@ no schema change.
 - **No new services were introduced.** PR #7 adds idempotent report/Sheet tracking columns and a
   shared append lease in `db/schema.sql`; migrate the database before deploying that branch.
 - **Daily cadence is a ceiling on resilience.** With Hobby, a first-send failure costs up to a day, a
-  missed run can cost the email, and throughput is an estimated 25–30 emails per run. If volume or reliability
+  missed run can cost the email, and throughput depends on measured PDF and provider latency. If volume or reliability
   matters, the clean fixes are a plan that allows frequent crons (restore a short schedule; the logic
   already supports it) or an external scheduler calling the endpoint with the bearer secret.
 - **Why 47 h and not 48 h:** a retry window equal to the cron period would let the second sweep land
