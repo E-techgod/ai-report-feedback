@@ -32,7 +32,8 @@ export const IDS = { projectId: 'prj_test123', orgId: 'team_test456' };
  *   FAKE_API_FAIL / FAKE_API_RAW   make the custom-environments call fail / print raw text
  * `env add` without --force refuses an existing variable in the same target (or a hidden record).
  * Successful adds persist fake records unless FAKE_NO_PERSIST is set; that models a CLI exit 0
- * without a Vercel write. The fake requires the CLI 66.2.0 --environment/--project flags.
+ * without a Vercel write. The fake requires CLI 66.2.0 --environment/--project and, for creates,
+ * explicit --type/--yes to resolve the type and Preview-branch prompts.
  */
 function fakeVercel(dir) {
   const bin = path.join(dir, 'fake-vercel.mjs');
@@ -98,6 +99,13 @@ if (argv[0] === 'env' && argv[1] === 'add') {
   if (argv[projectFlag + 1] !== process.env.VERCEL_PROJECT_ID) {
     console.error('Error: wrong project');
     process.exit(1);
+  }
+  if (!argv.includes('--force')) {
+    const typeFlag = argv.indexOf('--type');
+    if (typeFlag < 0 || !['secret', 'config'].includes(argv[typeFlag + 1]) || !argv.includes('--yes')) {
+      console.log(JSON.stringify({ status: 'action_required', reason: 'type_or_branch_required' }));
+      process.exit(0);
+    }
   }
   if (process.env.FAKE_FAIL_ON === argv[2]) {
     console.error('Vercel CLI 50.0.0');

@@ -474,6 +474,9 @@ test('explicit approval creates only the new name, without force or default upda
         'production',
         '--project',
         IDS.projectId,
+        '--type',
+        'secret',
+        '--yes',
       ],
     ],
   );
@@ -629,7 +632,8 @@ test('apply sends values on stdin only, pins the project, and touches nothing el
       '--project',
       IDS.projectId,
     ];
-    if (call.argv[2] === 'ANTHROPIC_API_KEY') expected.push('--force');
+    if (call.argv[2] === 'ANTHROPIC_API_KEY') expected.push('--force', '--yes');
+    else expected.push('--type', 'secret', '--yes');
     assert.deepEqual(call.argv, expected);
     for (const secret of SECRETS)
       assert.ok(!call.argv.join(' ').includes(secret), 'secret in argv');

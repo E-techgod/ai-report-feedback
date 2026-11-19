@@ -148,7 +148,20 @@ test('Production-only name is proposed for Preview and created only after approv
   assert.equal(await approved.done, 0, approved.err.join('\n'));
   assert.deepEqual(
     addCalls(ws).map((call) => call.argv),
-    [['env', 'add', 'ANTHROPIC_API_KEY', '--environment', 'preview', '--project', IDS.projectId]],
+    [
+      [
+        'env',
+        'add',
+        'ANTHROPIC_API_KEY',
+        '--environment',
+        'preview',
+        '--project',
+        IDS.projectId,
+        '--type',
+        'secret',
+        '--yes',
+      ],
+    ],
   );
   assertNoSecrets(assert, approved.out.join('\n') + approved.term.printed());
 });
@@ -205,7 +218,20 @@ test('approved Production-only entry can be created while a shared entry remains
   assert.equal(await r.done, 0, r.err.join('\n'));
   assert.deepEqual(
     addCalls(ws).map((call) => call.argv),
-    [['env', 'add', 'GOOGLE_PRIVATE_KEY', '--environment', 'preview', '--project', IDS.projectId]],
+    [
+      [
+        'env',
+        'add',
+        'GOOGLE_PRIVATE_KEY',
+        '--environment',
+        'preview',
+        '--project',
+        IDS.projectId,
+        '--type',
+        'secret',
+        '--yes',
+      ],
+    ],
   );
   assertNoSecrets(assert, r.out.join('\n') + r.term.printed());
 });
@@ -402,9 +428,52 @@ test('Preview new-name approval uses Preview and still requires the typed phrase
   assert.equal(await r.done, 0, r.err.join('\n'));
   assert.deepEqual(
     addCalls(ws).map((call) => call.argv),
-    [['env', 'add', 'NEW_SERVICE_TOKEN', '--environment', 'preview', '--project', IDS.projectId]],
+    [
+      [
+        'env',
+        'add',
+        'NEW_SERVICE_TOKEN',
+        '--environment',
+        'preview',
+        '--project',
+        IDS.projectId,
+        '--type',
+        'secret',
+        '--yes',
+      ],
+    ],
   );
   assert.doesNotMatch(r.out.join('\n') + r.term.printed(), /new-service-secret-value/);
+});
+
+test('public build variables use Config while keeping the value on stdin', async () => {
+  const ws = workspace({ extraEnv: ['NEXT_PUBLIC_BOOKING_URL=https://example.com/book'] });
+  const r = run(ws, [
+    '--target',
+    'preview',
+    '--only',
+    'NEXT_PUBLIC_BOOKING_URL',
+    '--expect-project',
+    IDS.projectId,
+  ]);
+  await prompted(r.term);
+  r.term.answer('sync preview');
+  assert.equal(await r.done, 0, r.err.join('\n'));
+  const [added] = addCalls(ws);
+  assert.deepEqual(added.argv, [
+    'env',
+    'add',
+    'NEXT_PUBLIC_BOOKING_URL',
+    '--environment',
+    'preview',
+    '--project',
+    IDS.projectId,
+    '--type',
+    'config',
+    '--yes',
+  ]);
+  assert.equal(added.stdin, 'https://example.com/book');
+  assert.doesNotMatch(r.out.join('\n') + r.term.printed(), /https:\/\/example.com\/book/);
 });
 
 // ---------------------------------------------------------------------------- the confirmation
@@ -485,7 +554,10 @@ test('apply with the right project and phrase writes through the CLI with the ex
       '--environment',
       'production',
       '--project',
-      IDS.projectId, // a create never carries --force
+      IDS.projectId,
+      '--type',
+      'secret',
+      '--yes', // a create never carries --force
     ]),
   );
   assertNoSecrets(assert, r.out.join('\n') + r.term.printed() + r.err.join('\n'));
