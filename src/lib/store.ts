@@ -39,6 +39,17 @@ export type ReportRecord = {
   emailLastError: string | null;
 };
 
+/**
+ * Send errors after which the provider MAY have accepted the message (the request was sent but we
+ * never saw an answer, or another request with the same key is in flight). Any other recorded
+ * error is an HTTP rejection, which means the message was not accepted.
+ */
+export const AMBIGUOUS_ERRORS = new Set([
+  'resend-timeout',
+  'resend-network-error',
+  'resend-http-409',
+]);
+
 export type ProviderEvent = 'delivered' | 'bounced' | 'complained' | 'delayed';
 
 export type ClaimOptions = { maxAttempts: number; leaseMs: number; maxAgeMs: number };
@@ -244,6 +255,71 @@ export function createStore(sql: SqlExecutor) {
         ],
       );
       return rows.map((r) => String(r.id));
+    },
+
+    /**
+     * Moves reports that can never be retried to the terminal 'failed_final' so they stop showing
+     * as "sending": older than the retry window, or out of attempts (including a last attempt whose
+     * worker crashed, i.e. an expired 'sending' lease). Active leases are never touched.
+     * Returns the ids it finalized.
+     */
+    async expireStale(now: Date, opts: ClaimOptions): Promise<string[]> {
+      const rows = await sql(
+        `update reports set
+           email_status = 'failed_final',
+           email_lease_until = null,
+           email_next_attempt_at = null,
+           email_last_error = case when email_attempts >= $3 then 'attempts-exhausted' else 'expired' end,
+           email_updated_at = $1
+         where (
+           (email_status in ('pending', 'failed') and (created_at < $2 or email_attempts >= $3))
+           or (email_status = 'sending' and email_lease_until < $1 and (created_at < $2 or email_attempts >= $3))
+         )
+         returning id, email_last_error`,
+        [
+          now.toISOString(),
+          new Date(now.getTime() - opts.maxAgeMs).toISOString(),
+          opts.maxAttempts,
+        ],
+      );
+      for (const row of rows)
+        await event(String(row.id), now, 'failed_final', String(row.email_last_error));
+      return rows.map((r) => String(r.id));
+    },
+
+    /**
+     * What happened in the attempts BEFORE the current one, from the audit trail (no new columns).
+     * `ambiguous` = some earlier attempt may have reached the provider without us learning the
+     * outcome (no result recorded, or a timeout / network error / in-flight conflict).
+     */
+    async attemptHistory(id: string): Promise<{ firstAttemptAt: Date | null; ambiguous: boolean }> {
+      const rows = await sql(
+        `select id, at, event, detail from report_email_events
+         where report_id = $1 and event in ('attempt', 'accepted', 'failed', 'failed_final')
+         order by id asc`,
+        [id],
+      );
+      // The newest 'attempt' row is the attempt that is running now.
+      let last = -1;
+      rows.forEach((row, i) => {
+        if (row.event === 'attempt') last = i;
+      });
+      const previous = last >= 0 ? rows.slice(0, last) : rows;
+      let firstAttemptAt: Date | null = null;
+      let ambiguous = false;
+      let open = false; // an attempt with no recorded outcome yet
+      for (const row of previous) {
+        if (row.event === 'attempt') {
+          firstAttemptAt ??= d(row.at);
+          if (open) ambiguous = true;
+          open = true;
+        } else {
+          open = false;
+          if (row.event === 'failed' && AMBIGUOUS_ERRORS.has(String(row.detail))) ambiguous = true;
+        }
+      }
+      if (open) ambiguous = true;
+      return { firstAttemptAt, ambiguous };
     },
 
     /** Fixed-window counter shared across serverless instances. Returns the count in the window. */

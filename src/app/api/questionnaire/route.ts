@@ -97,7 +97,7 @@ export async function POST(req: Request) {
       reportId: record.id,
       accessToken: reportAccessToken(record.id, secret),
       report: record.report,
-      email: publicEmailStatus(record),
+      email: publicEmailStatus(record, deps.config),
     });
   } catch (error) {
     if (error instanceof GenerationInProgressError) {

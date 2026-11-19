@@ -132,6 +132,11 @@ function emailMessage(email: EmailStatusView): { text: string; tone: 'ok' | 'wai
   switch (email.state) {
     case 'sending':
       return { text: `Enviando tu informe a ${email.to}…`, tone: 'wait' };
+    case 'retrying':
+      return {
+        text: 'No pudimos enviar el correo todavía. Lo reintentaremos automáticamente; mientras tanto puedes descargar tu informe en PDF aquí.',
+        tone: 'wait',
+      };
     case 'sent':
     case 'delivered':
       return { text: `Informe enviado a ${email.to}`, tone: 'ok' };

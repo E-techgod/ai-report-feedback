@@ -28,5 +28,5 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
   const record = await deps.store.getById(id);
   if (!record) return json({ ok: false }, 404);
-  return json({ ok: true, report: record.report, email: publicEmailStatus(record) });
+  return json({ ok: true, report: record.report, email: publicEmailStatus(record, deps.config) });
 }

@@ -23,8 +23,17 @@ export type PipelineConfig = {
   siteUrl: string | null;
   maxAttempts: number;
   leaseMs: number;
-  /** Reports older than this are never retried (provider idempotency keys last 24 h). */
+  /**
+   * Reports older than this are never retried and are finalized as failed. 47 h lets the daily
+   * recovery sweep (Vercel Hobby) reach every report at least once; see docs/report-email.md.
+   */
   maxAgeMs: number;
+  /**
+   * Resend remembers an idempotency key for 24 h. After this long since the first attempt a retry
+   * is no longer de-duplicated by the provider, so it is only allowed when no earlier attempt
+   * could have reached the provider (see AMBIGUOUS_ERRORS). Kept under 24 h as a safety margin.
+   */
+  idempotencyWindowMs: number;
   /** Delay before attempt n+1 after attempt n failed. */
   backoffMs: number[];
   /** Same person + same answers inside this window reuse the existing report. */
@@ -38,7 +47,8 @@ export type PipelineConfig = {
 export const DEFAULT_CONFIG: Omit<PipelineConfig, 'bookingUrl' | 'emailEnabled' | 'siteUrl'> = {
   maxAttempts: 5,
   leaseMs: 5 * 60_000,
-  maxAgeMs: 12 * 3_600_000,
+  maxAgeMs: 47 * 3_600_000,
+  idempotencyWindowMs: 23 * 3_600_000,
   backoffMs: [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000],
   dedupeWindowMs: 10 * 60_000,
   generationLockSeconds: 90,
@@ -138,6 +148,21 @@ export async function deliverReportEmail(
   });
   if (!claimed) return { outcome: 'not-claimed' };
 
+  // Retrying past the provider's idempotency window after an unknown outcome could send a second
+  // copy. In that case we stop and report a terminal failure instead of guessing.
+  if (claimed.emailAttempts > 1) {
+    const history = await store.attemptHistory(claimed.id);
+    const sinceFirst = history.firstAttemptAt
+      ? clock(deps).getTime() - history.firstAttemptAt.getTime()
+      : 0;
+    if (history.ambiguous && sinceFirst >= config.idempotencyWindowMs) {
+      const reason = 'unknown-outcome-after-idempotency-window';
+      console.error(`[email] report ${claimed.id} not retried: ${reason}`);
+      await store.markFailed(claimed.id, reason, null, clock(deps));
+      return { outcome: 'failed', error: reason, willRetry: false };
+    }
+  }
+
   let messageId: string | null;
   try {
     const pdf = await deps.renderPdf(claimed.report);
@@ -181,33 +206,48 @@ export async function deliverReportEmail(
   return { outcome: 'accepted', messageId };
 }
 
-/** Recovery sweep (cron): retries emails that are due, bounded by `limit` and the time budget. */
+/**
+ * Recovery sweep (daily cron). First finalizes reports that can no longer be retried, then works
+ * through EVERYTHING that is due in batches until the time budget runs out (a daily sweep must not
+ * leave a backlog for the next day). Safe to run concurrently: each send is claimed atomically.
+ */
 export async function processDueEmails(
   deps: PipelineDeps,
-  options: { limit?: number; budgetMs?: number } = {},
+  options: { batchSize?: number; budgetMs?: number } = {},
 ) {
-  const { limit = 10, budgetMs = 45_000 } = options;
+  const { batchSize = 25, budgetMs = 45_000 } = options;
   const { config } = deps;
-  const started = Date.now();
-  const due = await deps.store.listDueForEmail(clock(deps), limit, {
+  const opts = {
     maxAttempts: config.maxAttempts,
     leaseMs: config.leaseMs,
     maxAgeMs: config.maxAgeMs,
-  });
-  const summary = { due: due.length, accepted: 0, failed: 0, skipped: 0 };
-  for (const id of due) {
-    if (Date.now() - started > budgetMs) break;
-    const result = await deliverReportEmail(deps, id);
-    if (result.outcome === 'accepted') summary.accepted += 1;
-    else if (result.outcome === 'failed') summary.failed += 1;
-    else summary.skipped += 1;
+  };
+  const started = Date.now();
+  const expired = await deps.store.expireStale(clock(deps), opts);
+  const summary = { expired: expired.length, due: 0, accepted: 0, failed: 0, skipped: 0 };
+  const seen = new Set<string>();
+  while (Date.now() - started < budgetMs) {
+    const due = (await deps.store.listDueForEmail(clock(deps), batchSize, opts)).filter(
+      (id) => !seen.has(id),
+    );
+    if (due.length === 0) break;
+    for (const id of due) {
+      if (Date.now() - started >= budgetMs) return summary;
+      seen.add(id);
+      summary.due += 1;
+      const result = await deliverReportEmail(deps, id);
+      if (result.outcome === 'accepted') summary.accepted += 1;
+      else if (result.outcome === 'failed') summary.failed += 1;
+      else summary.skipped += 1;
+    }
   }
   return summary;
 }
 
 /* ---------------- what the browser is allowed to know ---------------- */
 
-export type PublicEmailState = 'off' | 'sending' | 'sent' | 'delivered' | 'failed' | 'bounced';
+export type PublicEmailState =
+  'off' | 'sending' | 'retrying' | 'sent' | 'delivered' | 'failed' | 'bounced';
 
 const STATE: Record<EmailStatus, PublicEmailState> = {
   disabled: 'off',
@@ -215,7 +255,7 @@ const STATE: Record<EmailStatus, PublicEmailState> = {
   sending: 'sending',
   accepted: 'sent',
   delivered: 'delivered',
-  failed: 'sending', // an automatic retry is scheduled
+  failed: 'retrying',
   failed_final: 'failed',
   bounced: 'bounced',
   complained: 'sent',
@@ -226,6 +266,25 @@ export function maskEmail(email: string): string {
   return `${local.slice(0, 1)}${'•'.repeat(Math.max(local.length - 1, 1))}@${domain}`;
 }
 
-export function publicEmailStatus(record: ReportRecord) {
-  return { state: STATE[record.emailStatus], to: maskEmail(record.email) };
+/**
+ * What the customer sees. Derived at read time too, so a report that can no longer be retried
+ * (too old, or out of attempts) shows a terminal failure immediately, even before the next sweep
+ * persists it. 'retrying' = a later automatic attempt is still possible.
+ */
+export function publicEmailStatus(
+  record: ReportRecord,
+  config: Pick<PipelineConfig, 'maxAgeMs' | 'maxAttempts'> = DEFAULT_CONFIG,
+  now: Date = new Date(),
+) {
+  const unfinished = ['pending', 'failed', 'sending'].includes(record.emailStatus);
+  const leaseActive =
+    record.emailStatus === 'sending' && (record.emailLeaseUntil?.getTime() ?? 0) >= now.getTime();
+  const expired =
+    unfinished &&
+    !leaseActive &&
+    (now.getTime() - record.createdAt.getTime() > config.maxAgeMs ||
+      record.emailAttempts >= config.maxAttempts);
+  let state: PublicEmailState = expired ? 'failed' : STATE[record.emailStatus];
+  if (state === 'sending' && record.emailStatus === 'sending' && !leaseActive) state = 'retrying';
+  return { state, to: maskEmail(record.email) };
 }
