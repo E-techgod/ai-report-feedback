@@ -21,9 +21,9 @@ import s from './ReportView.module.css';
 export type PdfDownload = { token: string; expiresInMs: number };
 
 export const DOWNLOAD_COPY = {
-  window: 'Your PDF can be downloaded for 5 minutes after submission.',
-  remaining: (mmss: string) => `Time remaining: ${mmss}`,
-  expired: 'Your download session has expired.',
+  window: 'Podrás descargar tu PDF durante 5 minutos después de enviar tu diagnóstico.',
+  remaining: (mmss: string) => `Tiempo restante: ${mmss}`,
+  expired: 'Tu sesión de descarga ha expirado.',
   failed: 'No se pudo descargar el PDF. Intenta nuevamente.',
 } as const;
 

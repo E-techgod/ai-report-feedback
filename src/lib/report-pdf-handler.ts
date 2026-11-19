@@ -56,7 +56,7 @@ export async function handlePdfDownload(
     secret,
     now?.(),
   );
-  if (check === 'expired') return fail(410, 'Your download session has expired.');
+  if (check === 'expired') return fail(410, 'Tu sesión de descarga ha expirado.');
   if (check !== 'ok') return fail(401, 'Descarga no autorizada.');
 
   let pdf: Buffer;

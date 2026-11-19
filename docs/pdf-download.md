@@ -22,7 +22,7 @@ POST /api/report/pdf       header x-download-token, body = the report JSON
   answers-derived model and the AI narrative). A grant only works with the exact report it was
   issued for: another client's report or an edited copy fails with 401.
 - The expiry is inside the signature, so it cannot be extended. The server answers 410 with
-  "Your download session has expired." once `now >= expiresAt`. Repeated downloads before that are
+  "Tu sesión de descarga ha expirado." once `now >= expiresAt`. Repeated downloads before that are
   allowed.
 - Verification needs only `REPORT_TOKEN_SECRET`, so it works on any Vercel function instance.
 - The token contains no report content. The report travels in a POST body, never in a URL.

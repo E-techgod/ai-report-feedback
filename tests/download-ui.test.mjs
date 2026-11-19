@@ -24,11 +24,11 @@ async function render(props) {
 
 test('after submission the download button is enabled and the 5-minute window is shown', async () => {
   const html = await render({ pdf: { token: 't', expiresInMs: 300_000 } });
-  assert.match(html, /5 minutes/);
-  assert.match(html, /Time remaining: 5:00/);
+  assert.match(html, /durante 5 minutos/);
+  assert.match(html, /Tiempo restante: 5:00/);
   assert.match(html, /Descargar PDF/);
   assert.doesNotMatch(html, /<button[^>]*pdfButton[^>]*disabled/);
-  assert.doesNotMatch(html, /download session has expired/);
+  assert.doesNotMatch(html, /sesión de descarga ha expirado/);
 });
 
 test('the report view no longer renders any email status or retrieval action', async () => {
@@ -45,6 +45,6 @@ test('the browser never persists the grant or the report', () => {
 
 test('the expired state copy is exactly the specified message', () => {
   const text = readFileSync(new URL('../src/components/ReportView.tsx', import.meta.url), 'utf8');
-  assert.ok(text.includes("expired: 'Your download session has expired.'"));
+  assert.ok(text.includes("expired: 'Tu sesión de descarga ha expirado.'"));
   assert.match(text, /disabled=\{pdfBusy \|\| expired\}/);
 });

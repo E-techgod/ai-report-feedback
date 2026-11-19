@@ -65,7 +65,7 @@ test('after five minutes the same previously valid token is refused and nothing 
     const response = await download(s, report, token, offset);
     assert.equal(response.status, 410);
     assert.match(response.headers.get('cache-control') ?? '', /no-store/);
-    assert.equal((await response.json()).error, 'Your download session has expired.');
+    assert.equal((await response.json()).error, 'Tu sesión de descarga ha expirado.');
   }
   assert.equal(s.rendered.length, 1);
 });
