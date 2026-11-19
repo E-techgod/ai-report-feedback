@@ -1,10 +1,12 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
 :root {
-  --ink: #172a28;
-  --muted: #657371;
-  --line: #e2e6e1;
-  --gold: #be925a;
-  --bg: #f7f8f5;
-  --green: #1c4c3f;
+  --ink: #ffffff;
+  --muted: #a1a4ad;
+  --line: #34363c;
+  --gold: #d95d1e;
+  --bg: #000000;
+  --green: #d95d1e;
 }
 * {
   box-sizing: border-box;
@@ -16,7 +18,13 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 .shell {
@@ -25,7 +33,7 @@ body {
 .header {
   height: 82px;
   border-bottom: 1px solid var(--line);
-  background: white;
+  background: #000000;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -58,7 +66,7 @@ body {
 }
 .brand-sub {
   display: block;
-  color: #7d8985;
+  color: var(--muted);
   font-size: 8px;
   letter-spacing: 0.21em;
   margin-top: 3px;
@@ -74,23 +82,24 @@ body {
 }
 .eyebrow,
 .section-label {
-  color: #927044;
+  color: var(--gold);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.16em;
 }
 .container h1 {
-  font-family: Georgia, serif;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   font-size: clamp(36px, 5.2vw, 60px);
   line-height: 1.08;
   letter-spacing: -0.03em;
-  font-weight: 500;
+  font-weight: 650;
   max-width: 700px;
   margin: 18px 0;
 }
 .container h1 em {
-  font-weight: 400;
-  color: var(--green);
+  font-weight: 650;
+  color: var(--gold);
+  font-style: normal;
 }
 .lead {
   font-size: 17px;
@@ -104,11 +113,11 @@ body {
   margin-top: 35px;
   font-size: 12px;
   font-weight: 700;
-  color: var(--green);
+  color: var(--gold);
 }
 .progress {
   height: 5px;
-  background: #e3e7e3;
+  background: #34363c;
   border-radius: 8px;
   margin: 11px 0 27px;
   overflow: hidden;
@@ -119,16 +128,16 @@ body {
   transition: width 0.2s;
 }
 .panel {
-  background: white;
+  background: #1d1e22;
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: clamp(24px, 4.2vw, 50px);
-  box-shadow: 0 15px 50px rgba(14, 51, 40, 0.035);
+  box-shadow: 0 15px 50px rgba(0, 0, 0, 0.24);
 }
 h2 {
-  font-family: Georgia, serif;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   font-size: 30px;
-  font-weight: 500;
+  font-weight: 650;
   letter-spacing: -0.02em;
   margin: 15px 0 9px;
 }
@@ -156,17 +165,20 @@ input:not([type='checkbox']) {
   width: 100%;
   padding: 15px 14px;
   border-radius: 8px;
-  border: 1px solid #d8ded9;
-  background: #fbfcfb;
+  border: 1px solid var(--line);
+  background: #16171a;
   color: var(--ink);
   font: inherit;
   font-weight: 400;
   outline: none;
 }
+input:not([type='checkbox'])::placeholder {
+  color: #858891;
+}
 input:focus-visible,
 button:focus-visible,
 a:focus-visible {
-  outline: 3px solid #c49b66;
+  outline: 3px solid var(--gold);
   outline-offset: 3px;
 }
 .consent {
@@ -180,10 +192,10 @@ a:focus-visible {
 }
 .consent input {
   margin-top: 3px;
-  accent-color: var(--green);
+  accent-color: var(--gold);
 }
 a {
-  color: var(--green);
+  color: var(--gold);
 }
 button,
 .primary,
@@ -205,27 +217,27 @@ button:disabled {
 }
 .primary {
   background: var(--green);
-  color: white;
+  color: #000000;
   border: 1px solid var(--green);
   min-height: 49px;
 }
 .primary:hover:not(:disabled) {
-  background: #123b30;
+  background: #b94d17;
 }
 .secondary {
-  background: white;
-  border: 1px solid #d7dfd7;
+  background: #16171a;
+  border: 1px solid var(--line);
   color: var(--green);
   min-height: 49px;
 }
 .fine {
   font-size: 12px;
-  color: #85908b;
+  color: var(--muted);
   margin: 17px 0 0;
 }
 .error {
-  color: #a73730;
-  background: #fdf0ef;
+  color: #ffb4a8;
+  background: #46221f;
   padding: 12px;
   border-radius: 8px;
   font-size: 13px;
@@ -262,25 +274,25 @@ button:disabled {
 }
 .answer {
   display: flex;
-  border: 1px solid #dce2db;
+  border: 1px solid var(--line);
   border-radius: 9px;
   overflow: hidden;
 }
 .answer button {
   border: 0;
-  background: white;
-  color: #677671;
+  background: #16171a;
+  color: var(--muted);
   border-radius: 0;
   padding: 10px 18px;
   font-size: 13px;
   min-width: 55px;
 }
 .answer button + button {
-  border-left: 1px solid #dce2db;
+  border-left: 1px solid var(--line);
 }
 .answer button.chosen {
   background: var(--green);
-  color: white;
+  color: #000000;
 }
 .actions {
   display: flex;
@@ -291,7 +303,7 @@ button:disabled {
 footer {
   border-top: 1px solid var(--line);
   padding: 26px max(24px, calc((100vw - 1100px) / 2));
-  color: #8b9691;
+  color: var(--muted);
   font-size: 10px;
   letter-spacing: 0.12em;
   display: flex;
@@ -338,7 +350,7 @@ footer {
 }
 @media print {
   body {
-    background: white;
+    background: #16171a;
   }
   .header,
   .progress,
@@ -365,12 +377,12 @@ footer {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(247, 248, 245, 0.92);
+  background: rgba(0, 0, 0, 0.92);
 }
 .generating-card {
   max-width: 420px;
   text-align: center;
-  background: white;
+  background: #1d1e22;
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 32px 28px;
@@ -378,7 +390,7 @@ footer {
 .generating-card h2 {
   margin: 16px 0 8px;
   font-size: 20px;
-  color: var(--green);
+  color: var(--gold);
 }
 .generating-card p {
   margin: 0;
