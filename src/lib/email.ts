@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FinalReport } from './final-report';
 import { renderEmailHtml } from './email-html';
 import { buildReportContent } from './report-content';
+import { emailLogoUrl } from './site-url';
 import type { ProviderEvent } from './store';
 
 /**
@@ -72,7 +73,7 @@ export function buildEmail(
   const highlights = emailHighlights(c);
   const attachmentName = opts.attachmentName ?? pdfFilename(report.firstName);
   const bookingLabel = 'Agenda una asesoría con Quirón';
-  const logoUrl = opts.siteUrl ? `${opts.siteUrl.replace(/\/$/, '')}/images/quiron-logo.png` : null;
+  const logoUrl = emailLogoUrl(opts.siteUrl);
   const html = renderEmailHtml({
     content: c,
     name,

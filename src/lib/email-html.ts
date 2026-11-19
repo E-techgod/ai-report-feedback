@@ -14,6 +14,9 @@ const C = {
   track: '#ededed',
   logo: '#000000',
 };
+/** Display size of the 604x264 logo PNG, in CSS pixels, at its natural aspect ratio. */
+export const LOGO_WIDTH = 120;
+export const LOGO_HEIGHT = Math.round((LOGO_WIDTH * 264) / 604);
 const FONT = "Inter,'Helvetica Neue',Helvetica,Arial,sans-serif";
 const WRAP = 'word-break:break-word;overflow-wrap:anywhere';
 
@@ -36,9 +39,11 @@ function progressBar(percent: number): string {
 export function renderEmailHtml(input: EmailHtmlInput): string {
   const { content: c, name, percent, highlights, attachmentName, logoUrl } = input;
   const { score, weak } = c.hero;
-  // The supplied PNG has white lettering, so it needs a small black field on the white email.
+  // The supplied PNG (604x264) has white lettering, so it needs a small black field on the white
+  // email. width/height attributes keep its 2.288 aspect ratio in Outlook; CSS height:auto keeps it
+  // elsewhere. Without a public HTTPS logo URL (see site-url.ts) a text wordmark is used instead.
   const logo = logoUrl
-    ? `<img src="${esc(logoUrl)}" alt="Quirón Arquitectos Financieros" width="120" style="display:block;border:0;outline:none;width:120px;max-width:100%;height:auto">`
+    ? `<img src="${esc(logoUrl)}" alt="Quirón" width="${LOGO_WIDTH}" height="${LOGO_HEIGHT}" style="display:block;border:0;outline:none;width:${LOGO_WIDTH}px;max-width:100%;height:auto">`
     : `<span style="font-size:19px;font-weight:700;letter-spacing:2px;color:#ffffff">QUIRÓN<span style="color:${C.orange}">.</span></span>`;
   const findings = highlights
     .map(
