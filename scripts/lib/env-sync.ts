@@ -78,6 +78,11 @@ export const PHRASE_STANDARD = 'sync production';
 export const PHRASE_ROTATION = 'rotate production secrets';
 export type SyncTarget = 'preview' | 'production';
 
+/** CLI 66.2.0 asks for a type unless one is specified. Public build values must be Config. */
+export function variableTypeForCreate(name: string): 'config' | 'secret' {
+  return name.startsWith('NEXT_PUBLIC_') ? 'config' : 'secret';
+}
+
 const OPT_IN_WARNINGS: Record<string, string> = {
   REPORT_TOKEN_SECRET:
     'signs every report access token: replacing it INVALIDATES all previously issued report links and downloads',
@@ -651,17 +656,22 @@ export function createVercelRunner(options: {
         parseCustomEnvironments,
       );
     },
+    // `--type` and `--yes` resolve the CLI's type and Preview-branch prompts. The script already
+    // required its own typed human confirmation; the value still reaches the child only on stdin.
     // No `--force`: a same-target value cannot be overwritten.
     createVariable: (name, value) => {
       if (!projectId) throw new Error('project identity not pinned');
-      return write(value, ['env', 'add', name, '--environment', target, '--project', projectId]);
+      return write(value, [
+        'env', 'add', name, '--environment', target, '--project', projectId,
+        '--type', variableTypeForCreate(name), '--yes',
+      ]);
     },
     // `--force` overwrites the target record; the caller has proven it is a lone target-only
     // record in a project without custom environments. Nothing else is touched. Never `env rm`.
     updateVariable: (name, value) => {
       if (!projectId) throw new Error('project identity not pinned');
       return write(value, [
-        'env', 'add', name, '--environment', target, '--project', projectId, '--force',
+        'env', 'add', name, '--environment', target, '--project', projectId, '--force', '--yes',
       ]);
     },
   };
