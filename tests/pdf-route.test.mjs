@@ -42,6 +42,46 @@ test('PDF response uses the stored report and never waits on slow Sheet synchron
   await pending;
 });
 
+test('a failed PDF render is logged by name, returns a no-store 500 and records no download', async () => {
+  const { deps, store } = await harness({ emailEnabled: false }).build();
+  const { record } = await store.insertReport({
+    report: sampleReport(),
+    email: 'a@b.com',
+    fingerprint: fingerprintOf('a@b.com'),
+    emailStatus: 'disabled',
+    now: new Date(),
+  });
+  deps.renderPdf = async () => {
+    throw new Error("Cannot find module 'pdfkit/js/standard-fonts/Helvetica.cjs'");
+  };
+  const secret = 's'.repeat(32);
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => logged.push(args.join(' '));
+  let response;
+  try {
+    response = await handlePdfDownload(
+      new Request('https://example.com/api/report/pdf', {
+        headers: { 'x-report-token': reportAccessToken(record.id, secret) },
+      }),
+      record.id,
+      deps,
+      secret,
+      () => {
+        throw new Error('must not schedule tracking for a failed download');
+      },
+    );
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(response.status, 500);
+  assert.match(response.headers.get('cache-control') ?? '', /no-store/);
+  assert.equal((await response.arrayBuffer()).byteLength, 0);
+  assert.equal((await store.getById(record.id)).pdfDownloadedAt, null);
+  assert.equal(logged.length, 1);
+  assert.match(logged[0], new RegExp(`^\\[pdf\\] report ${record.id}: render-failed: .*Helvetica`));
+});
+
 test('PDF handler rejects missing access token before reading a report', async () => {
   let reads = 0;
   const deps = {
