@@ -5,14 +5,18 @@ import { handlePdfDownload } from '../src/lib/report-pdf-handler.ts';
 import { renderReportPdf } from '../src/lib/pdf/ReportPdf.tsx';
 import { sampleReport } from './helpers/fixtures.mjs';
 import { T0 } from './helpers/flow-harness.mjs';
+import { freshLimiter } from './helpers/ledger.mjs';
 
 const SECRET = 's'.repeat(32);
 const at = (ms) => () => new Date(T0 + ms);
 
 function setup() {
   const rendered = [];
+  const { limiter, gateway } = freshLimiter();
   return {
     rendered,
+    limiter,
+    ledger: gateway,
     renderPdf: async (report) => {
       rendered.push(report);
       return Buffer.from('%PDF-fake');
@@ -34,6 +38,7 @@ const download = (s, report, token, offsetMs = 1_000, extra) =>
   handlePdfDownload(post(report, token, extra), {
     secret: SECRET,
     renderPdf: s.renderPdf,
+    limiter: s.limiter,
     now: at(offsetMs),
   });
 
@@ -122,7 +127,7 @@ test('malformed or oversized bodies are rejected before any rendering', async ()
   assert.equal(s.rendered.length, 0);
 });
 
-test('a failed render is logged by name, returns a no-store 500 and leaks no report content', async () => {
+test('a failed render is logged as a structured event, returns a no-store 500 and leaks no report content', async () => {
   const report = sampleReport();
   const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
   const logged = [];
@@ -132,6 +137,7 @@ test('a failed render is logged by name, returns a no-store 500 and leaks no rep
   try {
     response = await handlePdfDownload(post(report, token), {
       secret: SECRET,
+      limiter: freshLimiter().limiter,
       now: at(1_000),
       renderPdf: async () => {
         throw new Error("Cannot find module 'pdfkit/js/standard-fonts/Helvetica.cjs'");
@@ -142,7 +148,13 @@ test('a failed render is logged by name, returns a no-store 500 and leaks no rep
   }
   assert.equal(response.status, 500);
   assert.match(response.headers.get('cache-control') ?? '', /no-store/);
-  assert.ok(logged.some((line) => line.includes('[pdf] render-failed')));
+  // Structured, diagnosable by reason and error class, and without the error text.
+  const event = JSON.parse(logged.find((line) => line.includes('pdf_render_failed')));
+  assert.deepEqual(
+    [event.event, event.reason, event.cause],
+    ['pdf_render_failed', 'missing_asset', 'Error'],
+  );
+  assert.ok(!logged.join(' ').includes('pdfkit'), 'the error text is not logged');
   assert.ok(!logged.join(' ').includes(report.firstName));
 });
 
@@ -153,6 +165,7 @@ test('the real renderer produces a PDF from a report that went through JSON', as
   const response = await handlePdfDownload(post(received, token), {
     secret: SECRET,
     renderPdf: renderReportPdf,
+    limiter: freshLimiter().limiter,
     now: at(1_000),
   });
   assert.equal(response.status, 200);

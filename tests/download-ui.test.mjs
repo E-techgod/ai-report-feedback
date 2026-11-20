@@ -46,7 +46,9 @@ test('the browser never persists the grant or the report', () => {
 test('the expired state copy is exactly the specified message', () => {
   const text = readFileSync(new URL('../src/components/ReportView.tsx', import.meta.url), 'utf8');
   assert.ok(text.includes("expired: 'Tu sesión de descarga ha expirado.'"));
-  assert.match(text, /disabled=\{pdfBusy \|\| expired\}/);
+  assert.match(text, /disabled=\{pdfBusy \|\| expired \|\| limitReached\}/);
+  assert.ok(text.includes("limit: 'Alcanzaste el límite de 5 descargas de este informe.'"));
+  assert.match(text, /response\.status === 429/);
 });
 
 test('the dev preview download picker cannot bypass the Production restriction', async () => {

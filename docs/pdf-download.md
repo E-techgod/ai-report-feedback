@@ -5,13 +5,17 @@ Google Sheets is the only data store. No database, no email provider, no cron.
 ```
 POST /api/questionnaire
   1. validate (consent mandatory)
-  2. append the header-mapped row to the Sheet      -> failure: 502, no report, no grant
-  3. generate the report (rules + AI narrative)     -> failure: 502 (answers stay saved), no grant
-  4. issue a 5-minute download grant
-  <- { report, download: { token, expiresInMs } }   (report is NOT stored)
+  2. Sheet: duplicate check, then per-email limit    -> over the limit: 429, nothing else runs
+  3. append the header-mapped row to the Sheet       -> failure: 502/503, no report, no grant
+  4. generate the report (rules + AI narrative)      -> failure: 503 saved_unconfirmed (answers stay saved), no grant
+     (a duplicate never calls the AI, see "Duplicates")
+  5. issue a 5-minute download grant
+  <- { report, download: { token, expiresInMs } }    (report is NOT stored)
 
 POST /api/report/pdf       header x-download-token, body = the report JSON
-  verify grant -> render PDF with the existing ReportPdf template -> application/pdf
+  verify grant -> render PDF with the existing ReportPdf template
+  -> count it in the ledger (max 5 per submission)    -> over: 429
+  -> application/pdf
 ```
 
 ## The grant (`src/lib/download-grant.ts`)
@@ -22,8 +26,8 @@ POST /api/report/pdf       header x-download-token, body = the report JSON
   answers-derived model and the AI narrative). A grant only works with the exact report it was
   issued for: another client's report or an edited copy fails with 401.
 - The expiry is inside the signature, so it cannot be extended. The server answers 410 with
-  "Tu sesión de descarga ha expirado." once `now >= expiresAt`. Repeated downloads before that are
-  allowed.
+  "Tu sesión de descarga ha expirado." once `now >= expiresAt`. Within that window a submission may
+  download its PDF up to **5 times** (see [`handle-abuse.md`](./handle-abuse.md)), then the server answers 429.
 - Verification needs only `REPORT_TOKEN_SECRET`, so it works on any Vercel function instance.
 - The token contains no report content. The report travels in a POST body, never in a URL.
 - The browser keeps the report and grant in React state only (no localStorage). A reload ends the
@@ -45,30 +49,10 @@ one row's `Estado Reporte` cell to `Generado`, after the response is sent:
 Every other tracking column (`Estado Email`, `Estado Descarga PDF`, `Fecha *`, `Intentos Email`, ...)
 stays empty: there is nothing to project. The legacy Apps Script files in `scripts/` are untouched.
 
-## Production rate limiting (Vercel Firewall, no code)
+## Abuse protection
 
-The Neon-backed limits (10 submissions per IP per minute, 5 reports per email per day) are gone, so
-`/api/questionnaire` is otherwise open: each call costs one Groq request, several Google Sheets
-calls and one appended row. Smallest viable protection, one dashboard rule on the Production
-project (**Firewall -> Custom Rules -> New rule**):
-
-| Setting           | Value                                                                         |
-| ----------------- | ----------------------------------------------------------------------------- |
-| Name              | `questionnaire-rate-limit`                                                    |
-| If                | Request Path **equals** `/api/questionnaire` **and** Method **equals** `POST` |
-| Then              | **Rate Limit**                                                                |
-| Strategy          | Fixed Window                                                                  |
-| Window / Requests | 60 s / 10 requests                                                            |
-| Key               | IP address                                                                    |
-| Action when over  | default `429 Too Many Requests`                                               |
-
-- 10 per minute per IP is the limit the app enforced before; a real person submits once.
-- One rule fits the Hobby allowance (1 rate-limit rule, 3 custom rules); `/api/report/pdf` needs a
-  valid grant and is not worth a second rule. Hobby reports exist of the dashboard asking to upgrade
-  when choosing a custom 429 response: keep the default action if that happens.
-- Verify after publishing: send 11 `POST /api/questionnaire` requests with body `{}` from one IP
-  (they are rejected with 400 before touching Sheets or the AI, so the test is free); the 11th must
-  return 429. Remember the budget is per IP.
-- Residual risk: many IPs (botnet) or many people behind one NAT. If abuse appears, add Vercel
-  BotID or a challenge action; do not add a database or in-memory limiter.
-- This is a Production dashboard change: it is **not** applied by this PR.
+Per-email submission limit (5 per rolling 24 h), 5 successful downloads per submission, duplicate
+handling (the same report or a clear `409`, never a new AI call or window), the proposed Vercel Firewall
+rule (**100 POST requests per IP per 60 seconds** on `/api/questionnaire`, fixed window; not yet applied
+to Production), monitoring logs, limitations and an operations runbook are documented in
+[`docs/handle-abuse.md`](./handle-abuse.md).

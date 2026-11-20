@@ -2,7 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { questionIds } from '../src/lib/questions.ts';
 import { columnLetter, parseSheetSchema } from '../src/lib/sheet-schema.ts';
-import { buildRow, cleanText, escapeCell, saveSubmission, wallClock } from '../src/lib/sheets.ts';
+import {
+  buildRow,
+  cleanText,
+  escapeCell,
+  saveSubmission,
+  wallClock,
+  SavedUnconfirmedError,
+} from '../src/lib/sheets.ts';
 
 const HEADERS = [
   'Marca temporal',
@@ -143,7 +150,12 @@ test('a new submission is appended once and reported as created', async () => {
 
 test('success is NOT reported when Google does not confirm the write', async () => {
   const g = fakeGateway({ confirm: { updatedRows: 0, updatedCells: 0 } });
-  await assert.rejects(saveSubmission(g, submission()), /did not confirm/);
+  await assert.rejects(saveSubmission(g, submission()), (error) => {
+    // The append happened (Google said so), so this is "saved but not confirmed", with the cause kept.
+    assert.ok(error instanceof SavedUnconfirmedError);
+    assert.match(String(error.reason?.message), /did not confirm/);
+    return true;
+  });
 });
 
 test('read-back confirms a full row even if updatedCells omits blank placeholders', async () => {

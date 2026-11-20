@@ -21,9 +21,11 @@ import s from './ReportView.module.css';
 export type PdfDownload = { token: string; expiresInMs: number };
 
 export const DOWNLOAD_COPY = {
-  window: 'Podrás descargar tu PDF durante 5 minutos después de enviar tu diagnóstico.',
+  window:
+    'Podrás descargar tu PDF hasta 5 veces durante 5 minutos después de enviar tu diagnóstico.',
   remaining: (mmss: string) => `Tiempo restante: ${mmss}`,
   expired: 'Tu sesión de descarga ha expirado.',
+  limit: 'Alcanzaste el límite de 5 descargas de este informe.',
   failed: 'No se pudo descargar el PDF. Intenta nuevamente.',
 } as const;
 
@@ -147,6 +149,8 @@ export default function ReportView({ report, mode = 'client', pdf = null }: Repo
   // Display only: the server enforces the real expiry (a signed deadline inside the token).
   const [remainingMs, setRemainingMs] = useState<number | null>(pdf ? pdf.expiresInMs : null);
   const [refused, setRefused] = useState(false);
+  // The server counts successful downloads per submission; after the 5th it answers 429.
+  const [limitReached, setLimitReached] = useState(false);
   const expired = refused || (remainingMs !== null && remainingMs <= 0);
 
   // Highlight the current section in the left navigation.
@@ -184,7 +188,7 @@ export default function ReportView({ report, mode = 'client', pdf = null }: Repo
       window.print();
       return;
     }
-    if (expired) return;
+    if (expired || limitReached) return;
     setPdfBusy(true);
     setPdfError(false);
     try {
@@ -198,6 +202,10 @@ export default function ReportView({ report, mode = 'client', pdf = null }: Repo
       });
       if (response.status === 410) {
         setRefused(true);
+        return;
+      }
+      if (response.status === 429) {
+        setLimitReached(true);
         return;
       }
       if (!response.ok) throw new Error('pdf');
@@ -220,15 +228,17 @@ export default function ReportView({ report, mode = 'client', pdf = null }: Repo
         <div className={s.actionbar}>
           {pdf && (
             <span
-              className={cx(s.emailStatus, expired && s.emailError)}
-              role={expired ? 'alert' : 'timer'}
+              className={cx(s.emailStatus, (expired || limitReached) && s.emailError)}
+              role={expired || limitReached ? 'alert' : 'timer'}
             >
               {expired
                 ? DOWNLOAD_COPY.expired
-                : `${DOWNLOAD_COPY.window} ${DOWNLOAD_COPY.remaining(formatRemaining(remainingMs ?? pdf.expiresInMs))}`}
+                : limitReached
+                  ? DOWNLOAD_COPY.limit
+                  : `${DOWNLOAD_COPY.window} ${DOWNLOAD_COPY.remaining(formatRemaining(remainingMs ?? pdf.expiresInMs))}`}
             </span>
           )}
-          {pdfError && !expired && (
+          {pdfError && !expired && !limitReached && (
             <span className={cx(s.emailStatus, s.emailError)} role="alert">
               {DOWNLOAD_COPY.failed}
             </span>
@@ -237,7 +247,7 @@ export default function ReportView({ report, mode = 'client', pdf = null }: Repo
             type="button"
             className={s.pdfButton}
             onClick={downloadPdf}
-            disabled={pdfBusy || expired}
+            disabled={pdfBusy || expired || limitReached}
           >
             {pdfBusy ? 'Preparando PDF…' : 'Descargar PDF ↓'}
           </button>

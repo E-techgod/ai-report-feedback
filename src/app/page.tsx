@@ -75,6 +75,11 @@ export default function Home() {
         break;
       }
       if (!response?.ok || data.ok !== true) {
+        // The server answered definitively. The id it knows may now belong to a saved row, and a known
+        // id is always a duplicate, however long ago. So the next attempt (for example the "try again
+        // in about 10 minutes" of saved_unconfirmed) must be a NEW submission. Network errors and
+        // timeouts (no answer) keep the id, so a retry of those still never adds a second row.
+        submissionId.current = null;
         throw new Error(
           typeof data.error === 'string' ? data.error : 'No se pudo generar el diagnóstico.',
         );

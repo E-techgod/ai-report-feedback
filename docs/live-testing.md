@@ -1,0 +1,123 @@
+# Live testing the abuse protection (isolated spreadsheet only)
+
+`npm test` proves the logic against in-memory fakes. Only a real Google spreadsheet can show how Google
+actually orders concurrent appends and what the API costs, so there is an **opt-in** live suite.
+It **never touches the production spreadsheet**:
+
+- It creates a brand-new spreadsheet titled `[TEST] bp-questionnaire abuse protection <timestamp>` (or
+  uses the one in `LIVE_TEST_SHEET_ID`).
+- A hard guard refuses to run unless the spreadsheet title starts with `[TEST]`.
+- `GOOGLE_SHEET_ID` is deleted from the environment first, so a production id can never leak in.
+- Only `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY` are read from the env file; nothing is printed.
+- The AI is stubbed, so **no Groq calls** and no cost. The app is not deployed or started.
+- All Sheets calls go through a throttle (default 30/min, `LIVE_MAX_CALLS_PER_MIN`) because the Google
+  quota is **per project and per user, shared with Production** if you use the same service account.
+
+## Setup (once)
+
+1. In Google Sheets create a **new, empty** spreadsheet and title it exactly `[TEST] bp-questionnaire abuse protection`.
+   It must not be a copy of the real response sheet and must contain no real data. The suite adds the
+   response tab (`Respuestas de formulario 1`), the headers and the `Control de descargas` tab itself.
+2. Share it with the **service account** (the value of `GOOGLE_CLIENT_EMAIL`) as **Editor**.
+3. Copy the id from the URL: `https://docs.google.com/spreadsheets/d/<ID>/edit`.
+
+## Run it
+
+```bash
+LIVE_TEST_SHEET_ID=<ID> LIVE_TEST_ENV_FILE=/path/to/.env npm run test:live
+```
+
+`LIVE_TEST_ENV_FILE` is only read for `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY` (nothing is
+printed; a different `GOOGLE_SHEET_ID` in that file is ignored). Without `LIVE_TEST_SHEET_ID` the run stops
+immediately and makes no Google call. It also refuses an id that matches any `GOOGLE_SHEET_ID` line in
+the env file, and any spreadsheet whose title does not start with `[TEST]`.
+
+It takes several minutes (the throttle). Scenarios: (1) the 6th submission, (2) the rolling 24-hour
+window, (3) 8 concurrent submissions, (4) duplicates (cached, uncached, window over), (5) the 6th
+download and the ledger tab, (6) 10 parallel downloads over 3 simulated instances, (7) an ambiguous write
+(a row Google really saved, reported to the app as a quota error; the retry must be a clean `409` with
+no second row), (8) saved but not confirmed (a real append whose read-back fails: `503`
+`saved_unconfirmed` with the exact message, `Retry-After`, one row, clean `409`, new submission after
+10 minutes). It prints the real number of Sheets requests and the time per request. Expected after
+the quota optimization (`docs/sheets-quota.md`): 4 reads + 2 writes per accepted submission, 2 reads for a
+refused 6th, 1 read + 1 write per delivered download. If the live numbers are higher, the consolidation
+is not behaving as the fakes suggest.
+
+**What the live run does NOT do, on purpose:** it does not exhaust Google's quota. The quota belongs to
+the service account's Cloud project and is shared with Production, so a deliberate `429` test would
+throttle the real app. Quota errors are only simulated (and the ambiguous write above injects its fault
+into a real append). To test a real `429` safely, use a separate service account in a separate Cloud
+project and say so before running it.
+
+## Manual steps (browser and real deployment)
+
+The suite calls the handlers directly. What it cannot show is the real browser UI and Vercel's multiple
+instances. Do this on a **Preview** deployment (not Production) wired to a `[TEST]` spreadsheet shared
+with the service account, with `GROQ_API_KEY` set only if you want to see real AI text.
+
+1. **6th submission.** Fill the questionnaire 5 times with the same email, changing at least one answer
+   each time and waiting more than 10 minutes between attempts (or change answers and use the same
+   email after 10 minutes). The 6th must show the amber message "Has alcanzado el límite de 5
+   diagnósticos en 24 horas..." with no report. Check the sheet: 5 accepted rows, no 6th row.
+2. **Concurrency.** In DevTools, copy the `POST /api/questionnaire` request as cURL and run 8 copies in
+   parallel with one email and different answers (`for i in 1..8; do curl ... & done`). Expect exactly 5
+   `200` and 3 `429`, and 8 rows with 3 marked `Rechazado por límite`.
+3. **6th download.** On a report, press "Descargar PDF" 5 times (all download), the 6th must show
+   "Alcanzaste el límite de 5 descargas de este informe." and the button disables. Open the
+   `Control de descargas` tab: 5 or 6 rows with the same opaque `dl_...` key, no names or emails.
+4. **Duplicates.** Submit the same answers twice within 5 minutes: you see the identical report. Then
+   open a private window, submit the same email and answers: expect either the identical report or the
+   `409` message "Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde aquí...".
+   Never a different text.
+5. **Google down.** Revoke the service account's access to the `[TEST]` sheet and submit: the page
+   shows "No pudimos confirmar el envío de tu diagnóstico" (`502`); a download shows "No pudimos verificar tu
+   descarga" (`503`). Restore access and confirm the same grant works again.
+6. **Quota.** The `503` "Estamos recibiendo muchas solicitudes" is only reachable by really exhausting
+   the quota; it is covered by tests with a simulated Google `429` and is **not** expected to be
+   reproduced manually.
+
+## Not verifiable here
+
+- Multiple **real** Vercel instances hitting Google at once (the suite simulates instances with separate
+  Google clients in one process).
+- The Vercel Firewall rule (not applied, see `docs/handle-abuse.md` section 4).
+- Behavior at Google's real quota ceiling.
+
+## Results of the first live run (2026-11-19)
+
+Real Google Sheets, isolated `[TEST]` spreadsheet, the project's service account, AI stubbed. Reported
+separately from the in-memory tests (265 passing), which do not talk to Google.
+
+| Scenario                                                            | Live result                                                                                                           |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 1. 6th submission from one email                                    | pass: five accepted, the 6th is `429` with the friendly message, no AI call, no 6th row                               |
+| 2. Rolling 24-hour window                                           | pass                                                                                                                  |
+| 3. 8 concurrent submissions, one email                              | pass: exactly 5 `200` and 3 `429`; 8 rows written, 3 labelled `Rechazado por límite`; retries still `429`             |
+| 4. Duplicates                                                       | pass: identical report and grant when cached, `409` when not, `409` after the window, new submission after 10 minutes |
+| 5. 6th download                                                     | pass: 5 PDFs, the 6th is `429`; ledger tab created automatically; only timestamp and opaque `dl_` key stored          |
+| 6. 10 parallel downloads over 3 instances (separate Google clients) | pass: exactly 5 delivered                                                                                             |
+| 7. Ambiguous write (real append, injected quota error)              | pass: one row, no AI call; first answer `503`, retries `409`, resubmission after 10 minutes is a new row              |
+
+Requests per flow (counted at the gateway, one gateway call = one Google API request; the batching was
+also checked at HTTP level against a local server): accepted submission 4 reads + 2 writes (5 + 2 on a
+cold instance), refused 6th 2 reads, delivered download 1 read + 1 write, 6th download 0. 8 concurrent
+submissions: 19 reads + 11 writes (8 appends + 3 labels). 10 parallel downloads: 7 reads + 7 writes.
+
+Latency, unthrottled sample (about 35 and 12 calls, far below the quota): accepted submission about
+1.0-1.3 s of Sheets time, refused 6th submission 0.4 s, delivered download 0.3-0.5 s (the first one
+includes the one-time ledger tab check). The latencies in the full run are about 12 s per submission
+because the suite throttles itself to 30 calls per minute; do not read them as real latency.
+
+Not exercised live: a real Google `429` (it would throttle the quota shared with Production), several
+real Vercel instances, the browser UI, and the real AI. Observed: the `409` text after an ambiguous
+write still says "if you still have your report page open you can keep downloading", which is wrong in
+that case (see `docs/sheets-quota.md` section 7).
+
+### Second live run (scenarios 4, 7 and 8, after the `saved_unconfirmed` change)
+
+Same isolated `[TEST]` spreadsheet, real Google. All three pass. Scenario 8 (a real append whose read-back
+is made to fail, an injected fault on real storage) returned `503` `saved_unconfirmed` with the exact
+message and `Retry-After: 600`, left exactly one real row, the retry was a `409` with the neutral text
+("Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde aquí. Podrás generar un informe
+nuevo en 9 minutos."), and the same answers after 10 minutes created a second row and a report. Scenarios
+4 and 7 confirmed the new `409` text. Injected faults are not real Google failures.

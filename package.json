@@ -13,7 +13,8 @@
     "format:check": "prettier --check .",
     "env:check": "node --import tsx scripts/env-sync-production.ts --check",
     "env:sync:preview": "node --import tsx scripts/env-sync-production.ts --target preview",
-    "env:sync:production": "node --import tsx scripts/env-sync-production.ts"
+    "env:sync:production": "node --import tsx scripts/env-sync-production.ts",
+    "test:live": "LIVE_TEST=1 node --import tsx --test --test-concurrency=1 tests/live/live.test.mjs"
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.9.0",

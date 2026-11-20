@@ -8,9 +8,15 @@ export const dynamic = 'force-dynamic';
 // Report generation (AI narrative, up to ~40 s) happens inside this request.
 export const maxDuration = 60;
 
+// One Google client per function instance (not per request): it keeps the spreadsheet time zone and
+// the parsed header row, so a warm instance does not re-read them. Nothing here is trusted state: the
+// header row is re-validated inside every request's batched read (see src/lib/sheets.ts).
+let sheetsGateway: ReturnType<typeof createGoogleSheetsGateway>;
+
 export async function POST(req: Request) {
   const secret = reportTokenSecret();
-  const gateway = createGoogleSheetsGateway();
+  sheetsGateway ??= createGoogleSheetsGateway();
+  const gateway = sheetsGateway;
   if (!secret || !gateway) {
     console.error('[questionnaire] missing configuration (report secret or Google Sheets)');
     return NextResponse.json(

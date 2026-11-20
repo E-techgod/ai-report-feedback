@@ -7,6 +7,7 @@ import { generateReport } from '../src/lib/generate-report.ts';
 import { fallbackNarrative } from '../src/lib/report.ts';
 import { buildReportContent } from '../src/lib/report-content.ts';
 import { handlePdfDownload } from '../src/lib/report-pdf-handler.ts';
+import { freshLimiter } from './helpers/ledger.mjs';
 import { reportDeps, submission } from './helpers/flow-harness.mjs';
 
 test('web and PDF read the one generated report; the provider is called once', async () => {
@@ -26,6 +27,7 @@ test('web and PDF read the one generated report; the provider is called once', a
     }),
     {
       secret,
+      limiter: freshLimiter().limiter,
       now: h.deps.now,
       renderPdf: async (r) => (rendered.push(r), Buffer.from('%PDF-fake')),
     },

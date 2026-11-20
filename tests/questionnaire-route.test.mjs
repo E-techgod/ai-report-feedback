@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleQuestionnaire } from '../src/lib/questionnaire-handler.ts';
+import { createReportCache } from '../src/lib/report-cache.ts';
 import { verifyDownloadGrant } from '../src/lib/download-grant.ts';
 import { handlePdfDownload } from '../src/lib/report-pdf-handler.ts';
+import { freshLimiter } from './helpers/ledger.mjs';
 import { questionIds } from '../src/lib/questions.ts';
 import { wallClock } from '../src/lib/sheets.ts';
 import { reportDeps, submission } from './helpers/flow-harness.mjs';
@@ -83,20 +85,26 @@ function context(opts) {
     sheet,
     tasks,
     flush,
-    ctx: { deps: h.deps, secret: SECRET, gateway: sheet, schedule: (task) => tasks.push(task) },
+    ctx: {
+      deps: h.deps,
+      secret: SECRET,
+      gateway: sheet,
+      schedule: (task) => tasks.push(task),
+      reportCache: createReportCache(),
+    },
   };
 }
 
 const STATUS = 4; // "Estado Reporte"
 const OTHER_TRACKING = [5, 6, 7, 8, 9, 10, 11, 12, 14]; // email/download statuses, dates, error, attempts
 const silenced = async (fn) => {
-  const original = console.error;
+  const original = { error: console.error, warn: console.warn, info: console.info };
   const lines = [];
-  console.error = (...args) => lines.push(args.join(' '));
+  console.error = console.warn = console.info = (...args) => lines.push(args.join(' '));
   try {
     return { result: await fn(), lines };
   } finally {
-    console.error = original;
+    Object.assign(console, original);
   }
 };
 
@@ -146,8 +154,10 @@ test('end to end: the issued grant downloads repeatedly for five minutes, then e
   const { h, ctx } = context();
   const body = await (await handleQuestionnaire(request(submission()), ctx)).json();
   const rendered = [];
+  const { limiter } = freshLimiter();
   const run = async (offsetMs) =>
     handlePdfDownload(pdfRequest(body.report, body.download.token), {
+      limiter,
       secret: SECRET,
       now: () => new Date(h.clock.t + offsetMs),
       renderPdf: async (r) => (rendered.push(r), Buffer.from('%PDF-fake')),
@@ -170,6 +180,7 @@ test("another submission's grant cannot download this client's report", async ()
     )
   ).json();
   const response = await handlePdfDownload(pdfRequest(a.report, b.download.token), {
+    limiter: freshLimiter().limiter,
     secret: SECRET,
     renderPdf: async () => Buffer.from('%PDF-fake'),
   });
@@ -179,7 +190,7 @@ test("another submission's grant cannot download this client's report", async ()
 test('a failed Sheet write issues no grant and never calls the AI', async () => {
   const { h, sheet, ctx } = context();
   sheet.appendRow = async () => {
-    throw new Error('quota exceeded');
+    throw new Error('sheet exploded');
   };
   const originalError = console.error;
   console.error = () => {};
@@ -212,7 +223,9 @@ test('when the report cannot be generated the answers stay saved but no grant is
     console.error = originalError;
   }
   const body = await response.json();
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 503);
+  assert.equal(body.code, 'saved_unconfirmed');
+  assert.match(response.headers.get('retry-after') ?? '', /^\d+$/);
   assert.equal(body.saved, true);
   assert.equal('download' in body, false);
   assert.equal('report' in body, false);
@@ -306,7 +319,8 @@ test('a failed Sheet status update never affects the response or the grant', asy
   assert.equal(response.status, 200);
   assert.ok(body.download.token);
   const { lines } = await silenced(() => flush()); // the task itself must not throw
-  assert.ok(lines.some((line) => line.includes('could not set Estado Reporte')));
+  assert.ok(lines.some((line) => line.includes('"event":"status_update_failed"')));
+  assert.ok(!lines.join(' ').includes('quota exceeded'), 'the error text is not logged');
   assert.equal(sheet.rows[1][STATUS], 'Pendiente');
 });
 
@@ -328,14 +342,15 @@ test('if the row moved or changed, nothing is written', async () => {
   sheet.rows[1][3] = 'someone-else@example.com';
   const { lines } = await silenced(() => flush());
   assert.equal(sheet.writes.length, 0);
-  assert.ok(lines.some((line) => line.includes('no longer matches')));
+  const event = JSON.parse(lines.find((line) => line.includes('status_update_failed')));
+  assert.equal(event.code, 'row_mismatch', 'logged by code, not by message');
   assert.equal(sheet.rows[1][STATUS], 'Pendiente');
 });
 
 test('failed submissions leave Estado Reporte as Pendiente and schedule nothing', async () => {
   const failedSheet = context();
   failedSheet.sheet.appendRow = async () => {
-    throw new Error('quota exceeded');
+    throw new Error('sheet exploded');
   };
   await silenced(() => handleQuestionnaire(request(submission()), failedSheet.ctx));
   assert.equal(failedSheet.tasks.length, 0);
@@ -365,20 +380,24 @@ test('a retry or refresh with the same submission writes the status only once', 
   assert.equal(sheet.writes.length, 1, 'already Generado: no second write');
 });
 
-test('a page refresh (new submission id, same person and answers) reuses the row and issues a fresh window', async () => {
-  const { sheet, flush, ctx } = context();
+test('a page refresh (new submission id, same person and answers) reuses the row and the ORIGINAL window, without another AI call', async () => {
+  const { h, sheet, flush, ctx } = context();
   const first = submission();
-  await handleQuestionnaire(request(first), ctx);
+  const original = await (await handleQuestionnaire(request(first), ctx)).json();
   await flush();
   // Google returns dates as serial numbers; the fake stores text, so mirror the real shape.
-  sheet.rows[1][0] = wallClock(new Date(), 'Etc/GMT+6').serial;
+  sheet.rows[1][0] = wallClock(h.deps.now(), 'Etc/GMT+6').serial;
+  h.clock.t += 60_000; // one minute later
   const refreshed = await (
     await handleQuestionnaire(request({ ...first, id: crypto.randomUUID() }), ctx)
   ).json();
   await flush();
   assert.equal(refreshed.ok, true);
   assert.equal(refreshed.duplicate, true);
-  assert.equal(refreshed.download.expiresInMs, 300_000);
+  // Same report, same deadline: the window is NOT restarted by repeating the survey.
+  assert.equal(refreshed.download.expiresInMs, 240_000);
+  assert.equal(refreshed.download.token, original.download.token);
+  assert.equal(h.narrativeCalls.length, 1, 'the AI is not called again');
   assert.equal(sheet.rows.length, 2, 'no second row');
   assert.equal(sheet.rows[1][STATUS], 'Generado');
   assert.equal(sheet.writes.length, 1);
