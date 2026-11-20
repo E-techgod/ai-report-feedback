@@ -232,3 +232,29 @@ test('success is unchanged: same report, grant and Groq call count as before', a
   assert.equal(body.download.expiresInMs, 300_000, 'the 5-minute window is untouched');
   assert.equal(h.narrativeCalls.length, 1);
 });
+
+test('the recovery works only with a NEW submission id: a known id is a duplicate even after the window', async () => {
+  const { h, sheet, ctx } = questionnaireContext();
+  failReadBackOnce(sheet);
+  const input = submission();
+  await captured(() => send(ctx, input));
+  h.clock.t += 11 * MIN;
+  const sameId = await captured(() => send(ctx, input));
+  assert.equal(sameId.result.status, 409, 'the server will never reuse a known id');
+  assert.equal((await sameId.result.json()).code, 'duplicate_window_over');
+  const newId = await captured(() => send(ctx, { ...input, id: crypto.randomUUID() }));
+  assert.equal(newId.result.status, 200);
+});
+
+test('the page starts a new submission id after a definitive server answer (so "try again in 10 minutes" works)', async () => {
+  // Static guard: the behaviour was verified in a DOM (jsdom) against real handler responses, which the
+  // repository does not depend on. This keeps the line from being removed unnoticed.
+  const { readFileSync } = await import('node:fs');
+  const page = readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8');
+  assert.match(
+    page,
+    /if \(!response\?\.ok \|\| data\.ok !== true\) \{[\s\S]*?submissionId\.current = null;[\s\S]*?throw new Error\(/,
+  );
+  // ...and only there: network errors and timeouts keep the id so their retry never adds a row.
+  assert.equal(page.match(/submissionId\.current = null/g)?.length, 1);
+});

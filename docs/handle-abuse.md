@@ -366,6 +366,12 @@ None of these is hidden by the code.
   are different emails, and nothing verifies that the address is real or belongs to the sender. The
   per-email limit protects cost and fairness; resistance to bots has to come from the Firewall rule
   (plus BotID or a challenge if abuse appears).
+- **Anyone who knows an email address can use up its 5 daily submissions** (five requests are enough), which
+  blocks that person for up to 24 hours. This is inherent to a per-email limit with no verification of the
+  address; the 5 limit trades it for cost control. Treat a report of "I can't submit" with that in mind.
+- **A repeated submission can return the original report to whoever repeats it**: same email and the
+  same 20 answers within the 5 minutes, on the instance that generated it. That needs the victim's email
+  and exact answers, so it is not treated as a practical leak, but it is not authentication.
 - **The email limit depends on row order** in the response tab. Do not sort, re-order or insert rows
   there. Deleting a row frees a slot. Rows whose timestamp is not a real date and time (for example
   typed by hand) are ignored by the window.

@@ -171,6 +171,11 @@ What the app does now (smallest safe recovery, no new state, no extra Sheets req
 
 The cost is one burnt slot of the person's 5 per day and a wait of up to 10 minutes.
 
+**The page must use a new submission id for that second attempt.** A known id is always a duplicate, however
+long ago, so reusing it would answer `409` forever. The page now starts a new id after any definitive
+server answer (it keeps the id only when no answer arrived: network errors and timeouts), found in the
+final review: the first version of this recovery was a dead end for anyone who retried without reloading.
+
 Not done: a claim state (`Estado Reporte = Generando`) or writing `Generado` before the response. Neither
 can prove "never shown" without adding latency and a hard dependency on a second Sheets write. Revisit
 only if live data shows this case is frequent. Storing the report or the PDF is out of scope.
