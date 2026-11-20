@@ -98,13 +98,13 @@ function context(opts) {
 const STATUS = 4; // "Estado Reporte"
 const OTHER_TRACKING = [5, 6, 7, 8, 9, 10, 11, 12, 14]; // email/download statuses, dates, error, attempts
 const silenced = async (fn) => {
-  const original = console.error;
+  const original = { error: console.error, warn: console.warn, info: console.info };
   const lines = [];
-  console.error = (...args) => lines.push(args.join(' '));
+  console.error = console.warn = console.info = (...args) => lines.push(args.join(' '));
   try {
     return { result: await fn(), lines };
   } finally {
-    console.error = original;
+    Object.assign(console, original);
   }
 };
 
@@ -319,7 +319,8 @@ test('a failed Sheet status update never affects the response or the grant', asy
   assert.equal(response.status, 200);
   assert.ok(body.download.token);
   const { lines } = await silenced(() => flush()); // the task itself must not throw
-  assert.ok(lines.some((line) => line.includes('could not set Estado Reporte')));
+  assert.ok(lines.some((line) => line.includes('"event":"status_update_failed"')));
+  assert.ok(!lines.join(' ').includes('quota exceeded'), 'the error text is not logged');
   assert.equal(sheet.rows[1][STATUS], 'Pendiente');
 });
 
@@ -341,7 +342,8 @@ test('if the row moved or changed, nothing is written', async () => {
   sheet.rows[1][3] = 'someone-else@example.com';
   const { lines } = await silenced(() => flush());
   assert.equal(sheet.writes.length, 0);
-  assert.ok(lines.some((line) => line.includes('no longer matches')));
+  const event = JSON.parse(lines.find((line) => line.includes('status_update_failed')));
+  assert.equal(event.code, 'row_mismatch', 'logged by code, not by message');
   assert.equal(sheet.rows[1][STATUS], 'Pendiente');
 });
 

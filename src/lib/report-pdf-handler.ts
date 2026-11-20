@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { downloadLedgerKey, grantExpiresAt, verifyDownloadGrant } from './download-grant';
 import { MAX_DOWNLOADS_PER_SUBMISSION, type DownloadLimiter } from './download-ledger';
 import { finalReportSchema, deepFreeze, type FinalReport } from './final-report';
-import { logSecurityEvent } from './security-log';
+import { errorFacts, logSecurityEvent } from './security-log';
 import { NO_STORE } from './services';
 
 // A finalized report is ~10-15 KB of JSON; anything near this is not one.
@@ -79,11 +79,16 @@ export async function handlePdfDownload(
   try {
     outcome = await limiter.deliver(key, grantExpiresAt(token), clock, () => renderPdf(report));
   } catch (error) {
-    // Named log line (no report content) so a runtime packaging/render failure is diagnosable.
-    // A render failure never uses one of the downloads.
-    console.error(
-      `[pdf] render-failed: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown'}`,
-    );
+    // Diagnosable without report content: a coarse reason, the error class and its code, never its text
+    // (a render error could quote the report). A render failure never uses one of the downloads.
+    const text = error instanceof Error ? error.message : '';
+    logSecurityEvent('pdf_render_failed', {
+      grant,
+      reason: /ENOENT|MODULE_NOT_FOUND|Cannot find module|font/i.test(text)
+        ? 'missing_asset'
+        : 'render_error',
+      ...errorFacts(error),
+    });
     return fail(500, 'No se pudo generar el PDF.');
   }
   if (outcome.kind === 'limit') {

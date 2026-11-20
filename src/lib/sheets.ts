@@ -632,7 +632,11 @@ export async function markReportGenerated(
         foldAnswer(row[schema.questions[id]]) ===
         foldAnswer(normalizeAnswer(submission.answers[id])),
     );
-  if (!matches) throw new Error('Spreadsheet row no longer matches this submission');
+  // `code` is what the structured log records (never the text), so operators can tell why.
+  if (!matches)
+    throw Object.assign(new Error('Spreadsheet row no longer matches this submission'), {
+      code: 'row_mismatch',
+    });
   if (String(row[statusColumn] ?? '') === REPORT_GENERATED_LABEL) return false;
   await gateway.writeCells(
     rowNumber,

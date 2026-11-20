@@ -188,16 +188,25 @@ Code: `src/lib/security-log.ts`. One JSON line per event in the Vercel runtime l
 {"app":"bp-questionnaire","event":"download_served","grant":"3f9a1c2b","ordinal":2,"limit":5}
 ```
 
-| Event                        | Level | Meaning                                                                                  |
-| ---------------------------- | ----- | ---------------------------------------------------------------------------------------- |
-| `submission_rate_limited`    | warn  | 6th or later submission for an email in 24 h (`retryAfterSeconds`)                       |
-| `submission_duplicate`       | info  | `outcome`: `served_cached_report`, `refused_report_unavailable` or `refused_window_over` |
-| `download_served`            | info  | a PDF was delivered (`ordinal` 1 to 5)                                                   |
-| `download_limit_reached`     | warn  | the 6th or later download of a submission was refused                                    |
-| `download_limit_unavailable` | warn  | the ledger could not be reached (download refused, `503`; `reason` as above)             |
-| `download_expired`           | warn  | a genuine grant used after its 5 minutes (`410`)                                         |
-| `download_unauthorized`      | warn  | missing, invalid or mismatched grant (`reason`)                                          |
-| `sheets_unavailable`         | warn  | Google failed while saving a submission (`reason`: `quota`, `timeout`, `other`)          |
+| Event                        | Level | Meaning                                                                                       |
+| ---------------------------- | ----- | --------------------------------------------------------------------------------------------- |
+| `submission_rate_limited`    | warn  | 6th or later submission for an email in 24 h (`retryAfterSeconds`)                            |
+| `submission_duplicate`       | info  | `outcome`: `served_cached_report`, `refused_report_unavailable` or `refused_window_over`      |
+| `download_served`            | info  | a PDF was delivered (`ordinal` 1 to 5)                                                        |
+| `download_limit_reached`     | warn  | the 6th or later download of a submission was refused                                         |
+| `download_limit_unavailable` | warn  | the ledger could not be reached (download refused, `503`; `reason` as above)                  |
+| `download_expired`           | warn  | a genuine grant used after its 5 minutes (`410`)                                              |
+| `download_unauthorized`      | warn  | missing, invalid or mismatched grant (`reason`)                                               |
+| `sheets_unavailable`         | warn  | Google failed while saving a submission (`reason`: `quota`, `timeout`, `other`)               |
+| `report_generation_failed`   | error | the answers were saved but the report could not be built (`503` `saved_unconfirmed`)          |
+| `status_update_failed`       | warn  | the after-response `Estado Reporte` update failed (customer unaffected; `reason`)             |
+| `pdf_render_failed`          | error | the PDF could not be rendered (`reason`: `missing_asset` or `render_error`; no download used) |
+
+Failures carry `cause` (the error class, for example `GaxiosError`) and `code` (an HTTP status or a
+system code such as `429` or `ETIMEDOUT`), **never the error message**, because Google and library
+errors can quote the request (ranges, cell values, URLs). Only three unstructured lines remain in `src`,
+none with request data: the missing-configuration notice and two AI-narrative notices that print a fixed
+reason such as `rate-limited`. A test fails if another `console.*` call is added outside the logger.
 
 **What is never logged:** questionnaire answers, email addresses, names, IP addresses, download tokens,
 the report or its ids. Only allow-listed fields are written, and any value that is not a short machine

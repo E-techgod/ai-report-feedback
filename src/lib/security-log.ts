@@ -18,7 +18,10 @@ export type SecurityEvent =
   | 'download_limit_unavailable'
   | 'download_expired'
   | 'download_unauthorized'
-  | 'sheets_unavailable';
+  | 'sheets_unavailable'
+  | 'report_generation_failed'
+  | 'status_update_failed'
+  | 'pdf_render_failed';
 
 const ALLOWED_FIELDS = new Set([
   'subject',
@@ -28,14 +31,19 @@ const ALLOWED_FIELDS = new Set([
   'retryAfterSeconds',
   'ordinal',
   'limit',
+  'cause',
+  'code',
 ]);
 
 const SAFE_STRING = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 export type LogFields = Record<string, string | number | boolean | null | undefined>;
-export type LogSink = Pick<Console, 'info' | 'warn'>;
+export type LogSink = Pick<Console, 'info' | 'warn' | 'error'>;
 
 /** Events that mean "someone is being refused" log at warn; routine outcomes at info. */
+/** Things that broke on our side (not someone being refused): log at error. */
+const ERROR_EVENTS = new Set<SecurityEvent>(['report_generation_failed', 'pdf_render_failed']);
+
 const WARN_EVENTS = new Set<SecurityEvent>([
   'submission_rate_limited',
   'download_limit_reached',
@@ -43,6 +51,7 @@ const WARN_EVENTS = new Set<SecurityEvent>([
   'download_expired',
   'download_unauthorized',
   'sheets_unavailable',
+  'status_update_failed',
 ]);
 
 export function sanitizeFields(
@@ -64,7 +73,12 @@ export function logSecurityEvent(
   sink: LogSink = console,
 ): void {
   const line = JSON.stringify({ app: 'bp-questionnaire', event, ...sanitizeFields(fields) });
-  (WARN_EVENTS.has(event) ? sink.warn : sink.info).call(sink, line);
+  const write = ERROR_EVENTS.has(event)
+    ? sink.error
+    : WARN_EVENTS.has(event)
+      ? sink.warn
+      : sink.info;
+  write.call(sink, line);
 }
 
 /**
@@ -77,4 +91,24 @@ export function subjectFingerprint(email: string, secret: string): string {
     .update(`log-subject:v1.${email.trim().toLowerCase()}`)
     .digest('hex')
     .slice(0, 10);
+}
+
+/**
+ * What may be logged about a caught error: its class name (`GaxiosError`, `TypeError`) and a status or
+ * error code (`429`, `ETIMEDOUT`). NEVER its message: Google and library errors can embed request
+ * details (ranges, values, URLs), so the text is dropped. Both values still pass `sanitizeFields`.
+ */
+export function errorFacts(error: unknown): { cause?: string; code?: string | number } {
+  if (typeof error !== 'object' || error === null) return {};
+  const e = error as {
+    name?: unknown;
+    code?: unknown;
+    status?: unknown;
+    response?: { status?: unknown };
+  };
+  const code = e.response?.status ?? e.status ?? e.code;
+  return {
+    cause: typeof e.name === 'string' ? e.name : undefined,
+    code: typeof code === 'string' || typeof code === 'number' ? code : undefined,
+  };
 }

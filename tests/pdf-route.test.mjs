@@ -127,7 +127,7 @@ test('malformed or oversized bodies are rejected before any rendering', async ()
   assert.equal(s.rendered.length, 0);
 });
 
-test('a failed render is logged by name, returns a no-store 500 and leaks no report content', async () => {
+test('a failed render is logged as a structured event, returns a no-store 500 and leaks no report content', async () => {
   const report = sampleReport();
   const { token } = issueDownloadGrant(report, SECRET, new Date(T0));
   const logged = [];
@@ -148,7 +148,13 @@ test('a failed render is logged by name, returns a no-store 500 and leaks no rep
   }
   assert.equal(response.status, 500);
   assert.match(response.headers.get('cache-control') ?? '', /no-store/);
-  assert.ok(logged.some((line) => line.includes('[pdf] render-failed')));
+  // Structured, diagnosable by reason and error class, and without the error text.
+  const event = JSON.parse(logged.find((line) => line.includes('pdf_render_failed')));
+  assert.deepEqual(
+    [event.event, event.reason, event.cause],
+    ['pdf_render_failed', 'missing_asset', 'Error'],
+  );
+  assert.ok(!logged.join(' ').includes('pdfkit'), 'the error text is not logged');
   assert.ok(!logged.join(' ').includes(report.firstName));
 });
 

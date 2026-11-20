@@ -13,7 +13,7 @@ import { DOWNLOAD_WINDOW_MS, issueDownloadGrant } from './download-grant';
 import type { FinalReport } from './final-report';
 import { generateReport, type ReportDeps } from './generate-report';
 import { defaultReportCache, type ReportCache } from './report-cache';
-import { logSecurityEvent, subjectFingerprint } from './security-log';
+import { errorFacts, logSecurityEvent, subjectFingerprint } from './security-log';
 import { classifySheetsError } from './sheets-errors';
 import { NO_STORE } from './services';
 
@@ -110,9 +110,7 @@ export async function handleQuestionnaire(
   try {
     saved = await saveSubmissionWithRow(gateway, submission, clock());
   } catch (error) {
-    // Log only a short message: Google client errors can embed request details.
-    const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
-    console.error('[questionnaire] Google Sheets write failed:', message);
+    // Never log the error text (it can embed request details): only its class, code and our own reason.
     if (error instanceof SavedUnconfirmedError) {
       // The row exists but could not be confirmed: say so, and when the same answers can be sent again
       // (a retry before then is a duplicate, and reports are not stored, so it could not be served).
@@ -120,11 +118,17 @@ export async function handleQuestionnaire(
         subject,
         reason: classifySheetsError(error.reason),
         outcome: 'saved_unconfirmed',
+        ...errorFacts(error.reason),
       });
       return savedUnconfirmed(error.savedAtMs, clock().getTime());
     }
     const failure = classifySheetsError(error);
-    logSecurityEvent('sheets_unavailable', { subject, reason: failure, outcome: 'submission' });
+    logSecurityEvent('sheets_unavailable', {
+      subject,
+      reason: failure,
+      outcome: 'submission',
+      ...errorFacts(error),
+    });
     if (failure === 'quota')
       return json(
         {
@@ -223,12 +227,15 @@ export async function handleQuestionnaire(
           try {
             await markReportGenerated(gateway, submission, saved.rowNumber, 8_000);
           } catch (error) {
-            const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
-            console.error('[questionnaire] could not set Estado Reporte:', message);
+            logSecurityEvent('status_update_failed', {
+              subject,
+              reason: classifySheetsError(error),
+              ...errorFacts(error),
+            });
           }
         });
       } catch {
-        console.error('[questionnaire] could not schedule the Estado Reporte update');
+        logSecurityEvent('status_update_failed', { subject, reason: 'schedule_failed' });
       }
     }
     return json({
@@ -238,10 +245,7 @@ export async function handleQuestionnaire(
       download: { token: grant.token, expiresInMs: grant.expiresInMs },
     });
   } catch (error) {
-    console.error(
-      '[questionnaire] report generation failed:',
-      error instanceof Error ? error.message.slice(0, 200) : 'unknown',
-    );
+    logSecurityEvent('report_generation_failed', { subject, ...errorFacts(error) });
     return savedUnconfirmed(saved.submittedAtMs, clock().getTime());
   }
 }
