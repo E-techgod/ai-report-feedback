@@ -169,14 +169,15 @@ test('no unstructured console call in src prints an error message', async () => 
     .trim()
     .split('\n')
     .filter(Boolean);
-  // Allowed: the structured logger itself, a static configuration message and the AI client's categorical
-  // failure reason (`rate-limited`, `invalid-output`...). Anything else must use logSecurityEvent.
+  // Allowed: the structured logger, the fixed configuration message, the AI client's categorical
+  // failure reason, and its privacy-safe metadata diagnostic. Other calls use logSecurityEvent.
   const unexpected = found.filter(
     (line) =>
       !/src\/lib\/security-log\.ts/.test(line) &&
       !/missing configuration \(report secret or Google Sheets\)/.test(line) &&
       !/\[narrative\] AI share above limit/.test(line) &&
-      !/\[narrative\] attempt \$\{n\}\/\$\{maxAttempts\} failed: \$\{reason\}/.test(line),
+      !/\[narrative\] attempt \$\{n\}\/\$\{maxAttempts\} failed: \$\{reason\}/.test(line) &&
+      !/src\/lib\/narrative\.ts:.*console\.info\(/.test(line),
   );
   assert.deepEqual(unexpected, []);
 });

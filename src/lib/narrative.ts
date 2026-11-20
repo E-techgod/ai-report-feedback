@@ -1,4 +1,11 @@
-import { buildAiInput, fallbackNarrative, validateNarrative, type ReportModel } from './report';
+import {
+  buildAiInput,
+  fallbackNarrative,
+  narrativeSchema,
+  wordCount,
+  type Narrative,
+  type ReportModel,
+} from './report';
 import type { NarrativeOutcome } from './final-report';
 import { DEFAULT_LIMITS, aiWordLimits, promptWordTarget, type AiWordLimits } from './ai-share';
 
@@ -41,6 +48,24 @@ export type NarrativeConfig = {
   sleep?: (ms: number) => Promise<void>;
 };
 
+/** Preferred lengths leave room under the combined cap while field caps stay independent. */
+export function promptWordTargets(priorityCount: number, limits: AiWordLimits) {
+  const total = limits.total ?? limits.summary + priorityCount * limits.context;
+  const preferredTotal = Math.max(1, Math.floor(total * 0.85));
+  if (priorityCount === 0) {
+    return { summary: Math.min(promptWordTarget(limits.summary), preferredTotal), context: 0 };
+  }
+  const context = Math.min(
+    promptWordTarget(limits.context),
+    Math.max(1, Math.floor((preferredTotal * 0.45) / priorityCount)),
+  );
+  const summary = Math.min(
+    promptWordTarget(limits.summary),
+    Math.max(1, preferredTotal - priorityCount * context),
+  );
+  return { summary, context };
+}
+
 export function systemPrompt(
   priorityCount: number,
   delivery: 'tool' | 'json' = 'tool',
@@ -50,30 +75,52 @@ export function systemPrompt(
     delivery === 'tool'
       ? `llamando a la herramienta ${TOOL_NAME}`
       : 'como un objeto JSON que cumpla el esquema indicado, sin texto adicional';
+  const targets = promptWordTargets(priorityCount, limits);
+  const contexts =
+    priorityCount === 0
+      ? 'priorityContexts debe ser un arreglo vacío ([]).'
+      : `priorityContexts debe contener EXACTAMENTE ${priorityCount} textos, uno por prioridad y en el mismo orden, cada uno de máximo ${limits.context} palabras; procura ${targets.context} para explicar por qué ese hallazgo merece atención.`;
   return [
     'Eres un redactor de Quirón especializado en diagnóstico patrimonial orientativo; NO das asesoría legal, financiera ni fiscal.',
     'Recibirás resultados YA calculados por reglas. Tu única tarea es redactar texto breve que los explique.',
     'No cambies ni recalcules el score ni el nivel. No agregues cifras, diagnósticos, riesgos, prioridades, coberturas, pólizas, situación familiar ni acciones nuevas. No modifiques las acciones indicadas.',
-    `Entrega el resultado ${how}: executiveSummary (un párrafo de máximo ${promptWordTarget(limits.summary)} palabras que interprete los hallazgos) y priorityContexts (arreglo con EXACTAMENTE ${priorityCount} textos, uno por prioridad y en el mismo orden, cada uno de máximo ${promptWordTarget(limits.context)} palabras que expliquen por qué ese hallazgo merece atención).`,
+    `Entrega el resultado ${how}: executiveSummary debe ser un párrafo de máximo ${limits.summary} palabras; procura ${targets.summary} para interpretar los hallazgos. ${contexts}`,
+    limits.total === undefined
+      ? ''
+      : `En conjunto, executiveSummary y priorityContexts no deben superar ${limits.total} palabras.`,
     'Español mexicano profesional, claro y amable. Recomienda contrastar con documentación vigente y con un especialista, sin alarmismo.',
   ].join(' ');
 }
 
-export function toolDefinition(priorityCount: number) {
+export function toolDefinition(priorityCount: number, limits: AiWordLimits = DEFAULT_LIMITS) {
   return {
     name: TOOL_NAME,
-    description: 'Entrega la redacción del reporte (resumen ejecutivo y contexto por prioridad).',
+    description:
+      'Entrega la redacción del reporte (resumen ejecutivo y contexto por prioridad).' +
+      (limits.total === undefined
+        ? ''
+        : ` Máximo ${limits.total} palabras entre todos los campos.`),
     input_schema: {
       type: 'object',
       additionalProperties: false,
       required: ['executiveSummary', 'priorityContexts'],
       properties: {
-        executiveSummary: { type: 'string' },
+        executiveSummary: {
+          type: 'string',
+          description: `Resumen ejecutivo de máximo ${limits.summary} palabras.`,
+        },
         priorityContexts: {
           type: 'array',
+          description: `Exactamente ${priorityCount} contextos, en el orden de las prioridades.`,
           minItems: priorityCount,
           maxItems: priorityCount,
-          items: { type: 'string' },
+          items: {
+            type: 'string',
+            description:
+              priorityCount === 0
+                ? 'No hay contextos cuando no hay prioridades.'
+                : `Contexto de máximo ${limits.context} palabras.`,
+          },
         },
       },
     },
@@ -88,7 +135,12 @@ type ProviderAdapter = {
   /** Names of the server-side environment variables holding this provider's credentials. */
   env: { apiKey: string; model: string };
   headers: (apiKey: string) => Record<string, string>;
-  body: (modelId: string, model: ReportModel, limits: AiWordLimits) => unknown;
+  body: (
+    modelId: string,
+    model: ReportModel,
+    limits: AiWordLimits,
+    previousWordCount?: number,
+  ) => unknown;
   /** Locates the (still unvalidated) JSON candidate inside the provider response. */
   extract: (data: unknown) => unknown;
 };
@@ -102,11 +154,21 @@ const anthropic: ProviderAdapter = {
     'x-api-key': apiKey,
     'anthropic-version': '2023-06-01',
   }),
-  body: (modelId, model, limits) => ({
+  body: (modelId, model, limits, previousWordCount) => ({
     model: modelId,
     max_tokens: 800,
-    system: systemPrompt(model.priorities.length, 'tool', limits),
-    tools: [toolDefinition(model.priorities.length)],
+    system:
+      systemPrompt(model.priorities.length, 'tool', limits) +
+      (model.priorities.length > 0
+        ? ' Escribe cada contexto en una sola oración corta sobre por qué importa el hallazgo; omite introducciones y consejos repetidos.'
+        : '') +
+      (limits.total === undefined
+        ? ''
+        : ` Antes de llamar la herramienta, cuenta juntas las palabras de executiveSummary y de todos los priorityContexts. El límite total exacto es ${limits.total} palabras; apunta a ${Math.max(1, limits.total - 5)} palabras o menos para dejar margen.` +
+          (previousWordCount === undefined
+            ? ''
+            : ` El intento anterior sumó ${previousWordCount} palabras. Redacta una nueva versión con al menos ${previousWordCount - limits.total} palabras menos. Acorta primero los contextos y conserva la razón principal de cada prioridad.`)),
+    tools: [toolDefinition(model.priorities.length, limits)],
     tool_choice: { type: 'tool', name: TOOL_NAME },
     messages: [{ role: 'user', content: JSON.stringify(buildAiInput(model)) }],
   }),
@@ -174,8 +236,132 @@ const groq: ProviderAdapter = {
 const ADAPTERS: Record<string, ProviderAdapter> = { groq, anthropic };
 
 type Attempt =
-  | { ok: true; narrative: NonNullable<ReturnType<typeof validateNarrative>> }
-  | { ok: false; reason: string; retryable: boolean; retryAfterMs?: number };
+  | { ok: true; narrative: Narrative }
+  | {
+      ok: false;
+      reason: string;
+      retryable: boolean;
+      retryAfterMs?: number;
+      overBudgetWordCount?: number;
+    };
+
+/** Keep provider-controlled strings out of logs, including unexpected JSON field names. */
+function diagnosticLabel(value: unknown, allowed: readonly string[]): string | null {
+  return typeof value === 'string' && allowed.includes(value) ? value : null;
+}
+
+function diagnosticPath(path: PropertyKey[]): string {
+  return path
+    .map((part) =>
+      typeof part === 'number'
+        ? String(part)
+        : (diagnosticLabel(part, ['executiveSummary', 'priorityContexts']) ?? '[other]'),
+    )
+    .join('.');
+}
+
+function outputFields(candidate: unknown) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+  const fields = candidate as Record<string, unknown>;
+  return {
+    names: Object.keys(fields)
+      .slice(0, 10)
+      .map((name) => diagnosticLabel(name, ['executiveSummary', 'priorityContexts']) ?? '[other]'),
+    executiveSummary: {
+      type: typeof fields.executiveSummary,
+      words:
+        typeof fields.executiveSummary === 'string' ? wordCount(fields.executiveSummary) : null,
+    },
+    priorityContexts: {
+      type: Array.isArray(fields.priorityContexts) ? 'array' : typeof fields.priorityContexts,
+      length: Array.isArray(fields.priorityContexts) ? fields.priorityContexts.length : null,
+      words: Array.isArray(fields.priorityContexts)
+        ? fields.priorityContexts
+            .slice(0, 10)
+            .map((value) => (typeof value === 'string' ? wordCount(value) : null))
+        : null,
+    },
+  };
+}
+
+function logAttemptDiagnostic(args: {
+  adapter: ProviderAdapter;
+  modelId: string;
+  retry: number;
+  status: number | null;
+  data?: unknown;
+  candidate?: unknown;
+  issues?: { path: PropertyKey[]; code: string }[];
+  result: string;
+}) {
+  const data = args.data && typeof args.data === 'object' ? args.data : null;
+  const record = data as Record<string, unknown> | null;
+  const content = Array.isArray(record?.content) ? record.content : [];
+  const usage = record?.usage && typeof record.usage === 'object' ? record.usage : null;
+  const tokens = usage as Record<string, unknown> | null;
+  const tokenCount = (value: unknown) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  console.info(
+    '[narrative] diagnostic',
+    JSON.stringify({
+      provider: args.adapter.id,
+      model: /^(claude-|openai\/|meta-llama\/|llama-)[a-zA-Z0-9._/-]{1,90}$/.test(args.modelId)
+        ? args.modelId
+        : '[redacted]',
+      retry: args.retry,
+      httpStatus: args.status,
+      stopReason: diagnosticLabel(record?.stop_reason, [
+        'tool_use',
+        'end_turn',
+        'max_tokens',
+        'stop_sequence',
+        'refusal',
+        'model_context_window_exceeded',
+      ]),
+      contentBlockTypes: content
+        .slice(0, 10)
+        .map(
+          (block) =>
+            diagnosticLabel((block as Record<string, unknown> | null)?.type, [
+              'tool_use',
+              'text',
+              'thinking',
+              'redacted_thinking',
+            ]) ?? '[other]',
+        ),
+      namedToolUseFound:
+        args.adapter.id === 'anthropic'
+          ? content.some(
+              (block) =>
+                block &&
+                typeof block === 'object' &&
+                block.type === 'tool_use' &&
+                block.name === TOOL_NAME,
+            )
+          : null,
+      inputTokens: tokenCount(tokens?.input_tokens ?? tokens?.prompt_tokens),
+      outputTokens: tokenCount(tokens?.output_tokens ?? tokens?.completion_tokens),
+      outputFields: outputFields(args.candidate),
+      zodIssueCount: args.issues?.length ?? 0,
+      zodIssues:
+        args.issues?.slice(0, 20).map((issue) => ({
+          path: diagnosticPath(issue.path),
+          code:
+            diagnosticLabel(issue.code, [
+              'invalid_type',
+              'too_big',
+              'too_small',
+              'unrecognized_keys',
+              'custom',
+              'invalid_value',
+              'invalid_format',
+              'invalid_union',
+            ]) ?? '[other]',
+        })) ?? [],
+      result: args.result,
+    }),
+  );
+}
 
 /** Retry-After in seconds (Groq documents seconds). Returns null when absent or unusable. */
 export function parseRetryAfterMs(header: string | null): number | null {
@@ -190,37 +376,68 @@ async function attempt(
     adapter: ProviderAdapter;
     limits: AiWordLimits;
     fetchImpl: typeof fetch;
+    retry: number;
+    previousWordCount?: number;
   },
   timeoutMs: number,
 ): Promise<Attempt> {
   const count = model.priorities.length;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let status: number | null = null;
   try {
     const response = await cfg.fetchImpl(cfg.adapter.url, {
       method: 'POST',
       signal: controller.signal,
       headers: cfg.adapter.headers(cfg.apiKey),
-      body: JSON.stringify(cfg.adapter.body(cfg.modelId, model, cfg.limits)),
+      body: JSON.stringify(cfg.adapter.body(cfg.modelId, model, cfg.limits, cfg.previousWordCount)),
     });
+    status = response.status;
     if (response.status === 429) {
       // Never read or log the body: only the pause the provider asks for.
       const retryAfterMs =
         parseRetryAfterMs(response.headers.get('retry-after')) ?? DEFAULT_RATE_LIMIT_PAUSE_MS;
+      logAttemptDiagnostic({ ...cfg, status, result: 'rate-limited' });
       return { ok: false, reason: 'rate-limited', retryable: true, retryAfterMs };
     }
     if (!response.ok) {
+      logAttemptDiagnostic({ ...cfg, status, result: 'http-error' });
       return { ok: false, reason: `http-${response.status}`, retryable: response.status >= 500 };
     }
-    const narrative = validateNarrative(
-      cfg.adapter.extract(await response.json()),
-      count,
-      cfg.limits,
-    );
-    if (!narrative) return { ok: false, reason: 'invalid-output', retryable: true };
-    return { ok: true, narrative };
+    const data: unknown = await response.json();
+    const candidate = cfg.adapter.extract(data);
+    const parsed = narrativeSchema(count, cfg.limits).safeParse(candidate);
+    logAttemptDiagnostic({
+      ...cfg,
+      status,
+      data,
+      candidate,
+      issues: parsed.success ? [] : parsed.error.issues,
+      result: parsed.success ? 'valid' : 'invalid-output',
+    });
+    if (!parsed.success) {
+      const failure = { ok: false, reason: 'invalid-output', retryable: true } as const;
+      const { summary, context, total } = cfg.limits;
+      if (
+        cfg.adapter.id === 'anthropic' &&
+        total !== undefined &&
+        cfg.previousWordCount === undefined
+      ) {
+        // A candidate that passes every other constraint can be regenerated with count feedback.
+        const fields = narrativeSchema(count, { summary, context }).safeParse(candidate);
+        if (fields.success) {
+          const words =
+            wordCount(fields.data.executiveSummary) +
+            fields.data.priorityContexts.reduce((sum, value) => sum + wordCount(value), 0);
+          if (words > total) return { ...failure, overBudgetWordCount: words };
+        }
+      }
+      return failure;
+    }
+    return { ok: true, narrative: parsed.data };
   } catch (error) {
     const timedOut = error instanceof Error && error.name === 'AbortError';
+    logAttemptDiagnostic({ ...cfg, status, result: timedOut ? 'timeout' : 'error' });
     return { ok: false, reason: timedOut ? 'timeout' : 'error', retryable: true };
   } finally {
     clearTimeout(timer);
@@ -255,19 +472,21 @@ export async function generateNarrative(
   const maxAttempts = config.maxAttempts ?? MAX_ATTEMPTS;
   const started = Date.now();
   let reason = 'error';
+  let previousWordCount: number | undefined;
 
   for (let n = 1; n <= maxAttempts; n += 1) {
     const remaining = budget - (Date.now() - started);
     if (remaining < 1000) break;
     const result = await attempt(
       model,
-      { adapter, apiKey, modelId, fetchImpl, limits },
+      { adapter, apiKey, modelId, fetchImpl, limits, retry: n, previousWordCount },
       Math.min(attemptTimeout, remaining),
     );
     if (result.ok) return { narrative: result.narrative, source: 'ai', failureReason: null };
     reason = result.reason;
     console.warn(`[narrative] attempt ${n}/${maxAttempts} failed: ${reason}`);
-    if (!result.retryable) break;
+    if (!result.retryable || previousWordCount !== undefined) break;
+    previousWordCount = result.overBudgetWordCount;
     if (result.retryAfterMs !== undefined && n < maxAttempts) {
       // Wait for the provider's Retry-After only if it is short and a retry still fits the budget.
       const left = budget - (Date.now() - started);
