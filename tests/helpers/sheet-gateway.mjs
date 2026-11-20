@@ -41,7 +41,8 @@ const serialFromText = (text) => {
  * requests so concurrent submissions genuinely race.
  */
 export function fakeSheet({ interleave = false } = {}) {
-  const rows = [headers];
+  // `rows[0]` is the header row; tests may edit it (insert a column) to simulate a changed sheet.
+  const rows = [[...headers]];
   const writes = [];
   const calls = { append: 0, read: 0 };
   const wait = () => (interleave ? turn() : Promise.resolve());
@@ -54,7 +55,7 @@ export function fakeSheet({ interleave = false } = {}) {
     },
     async readHeaders() {
       await wait();
-      return headers;
+      return [...rows[0]];
     },
     async getTimeZone() {
       return 'Etc/GMT+6';
@@ -69,6 +70,16 @@ export function fakeSheet({ interleave = false } = {}) {
       await wait();
       return numbers.map((n) => [...rows[n - 1]]);
     },
+    /** Several ranges in ONE request, like values.batchGet (same shapes the Google gateway returns). */
+    async batchRead(ranges) {
+      calls.read += 1;
+      await wait();
+      return ranges.map((range) => {
+        if (range.kind === 'headers') return [[...rows[0]]];
+        if (range.kind === 'column') return rows.map((row) => [String(row[range.index] ?? '')]);
+        return [[...(rows[range.row - 1] ?? [])]];
+      });
+    },
     async appendRow(row) {
       await wait();
       calls.append += 1;
@@ -76,7 +87,12 @@ export function fakeSheet({ interleave = false } = {}) {
       stored[0] = serialFromText(row[0]);
       rows.push(stored);
       await wait();
-      return { updatedRows: 1, updatedCells: row.length, updatedRange: '' };
+      // Like Google: the A1 range of the row it landed in.
+      return {
+        updatedRows: 1,
+        updatedCells: row.length,
+        updatedRange: `'Respuestas de formulario 1'!A${rows.length}:AD${rows.length}`,
+      };
     },
     async writeCells(rowNumber, cells) {
       await wait();

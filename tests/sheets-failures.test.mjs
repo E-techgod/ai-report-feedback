@@ -60,7 +60,7 @@ test('Google failures are classified without ever reading personal data', () => 
 
 test('a Google quota error is a 503 with Retry-After, a friendly message and a reason-only log', async () => {
   const { h, sheet, ctx } = questionnaireContext();
-  sheet.readColumn = async () => {
+  sheet.batchRead = async () => {
     throw new GoogleError('Quota exceeded for quota metric ReadRequests, user=svc@secret.iam', 429);
   };
   const input = submission();
@@ -111,7 +111,7 @@ test('an append Google applied but reported as failed leaves ONE row, and the re
 
 test('a write confirmed late (verification read fails) behaves the same: one row, no duplicate', async () => {
   const { sheet, ctx } = questionnaireContext();
-  const realRead = sheet.readColumn.bind(sheet);
+  const realRead = sheet.batchRead.bind(sheet);
   let afterAppend = false;
   const realAppend = sheet.appendRow.bind(sheet);
   sheet.appendRow = async (row) => {
@@ -119,12 +119,12 @@ test('a write confirmed late (verification read fails) behaves the same: one row
     afterAppend = true;
     return r;
   };
-  sheet.readColumn = async (index) => {
+  sheet.batchRead = async (ranges) => {
     if (afterAppend) {
       afterAppend = false;
       throw new GoogleError('socket hang up', 'ECONNRESET');
     }
-    return realRead(index);
+    return realRead(ranges);
   };
   const input = submission();
   const { result: failed } = await captured(() => send(ctx, input));
@@ -158,7 +158,7 @@ test('FAULT INJECTION, submissions: with random Google failures the limit and co
     const email = `fault${seed}@example.com`;
     // Every Sheets call may fail; a failed append may nevertheless have been applied (ambiguous).
     const chance = 0.12;
-    for (const name of ['readHeaders', 'readColumn', 'readRows', 'writeCells']) {
+    for (const name of ['readHeaders', 'batchRead', 'writeCells']) {
       const real = sheet[name].bind(sheet);
       sheet[name] = async (...args) => {
         if (random() < chance) throw new GoogleError('boom', random() < 0.5 ? 429 : 'ETIMEDOUT');

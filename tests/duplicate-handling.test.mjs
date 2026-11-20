@@ -168,7 +168,7 @@ test('a duplicate whose original is still being served never extends the deadlin
 
 test('a Sheet failure while checking for duplicates still issues nothing and calls no AI', async () => {
   const { h, sheet, ctx } = questionnaireContext();
-  sheet.readColumn = async () => {
+  sheet.batchRead = async () => {
     throw new Error('sheet exploded');
   };
   const error = console.error;

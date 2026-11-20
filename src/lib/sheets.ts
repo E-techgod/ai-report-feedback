@@ -25,6 +25,16 @@ const MS_PER_DAY = 86_400_000;
 
 export type SheetCell = string | number;
 
+/**
+ * One range of a batched read. A whole batch is ONE Google API request however many ranges it has
+ * (Google counts requests, not ranges: https://developers.google.com/workspace/sheets/api/limits).
+ */
+export type SheetRange =
+  | { kind: 'headers' }
+  | { kind: 'column'; index: number }
+  /** A full row, limited to `width` columns when given. */
+  | { kind: 'row'; row: number; width?: number };
+
 export interface SheetsGateway {
   /** IANA time zone of the spreadsheet (so new timestamps match Form-generated ones). */
   getTimeZone(timeoutMs?: number): Promise<string>;
@@ -37,6 +47,11 @@ export interface SheetsGateway {
   appendRow(
     row: string[],
   ): Promise<{ updatedRows: number; updatedCells: number; updatedRange: string }>;
+  /**
+   * Several ranges in ONE request. Result `i` holds the rows of range `i` (a column is one cell per
+   * row; empty cells inside the range are empty rows). Optional: without it, each range costs a request.
+   */
+  batchRead?(ranges: SheetRange[], timeoutMs?: number): Promise<SheetCell[][][]>;
   /** Writes only the named tracking cells in an existing response row. */
   writeCells(
     rowNumber: number,
@@ -132,6 +147,96 @@ export function buildRow(
   return row;
 }
 
+/**
+ * Row number of an append, from the A1 range Google reports, e.g. `'Respuestas'!A42:AD42` (or
+ * `Sheet1!A7` for a single cell). 0 when the range cannot be understood.
+ */
+export function appendedRowNumber(range: string | null | undefined): number {
+  const match = /!\$?[A-Z]+\$?(\d+)(?::\$?[A-Z]+\$?(\d+))?$/.exec(range ?? '');
+  return match ? Number(match[2] ?? match[1]) : 0;
+}
+
+/** Reads several ranges in one request when the gateway can, otherwise one request per range. */
+async function readRanges(
+  gateway: SheetsGateway,
+  ranges: SheetRange[],
+  timeoutMs?: number,
+): Promise<SheetCell[][][]> {
+  if (gateway.batchRead) {
+    const result = await gateway.batchRead(ranges, timeoutMs);
+    if (result.length !== ranges.length) throw new Error('Google Sheets returned fewer ranges');
+    return result;
+  }
+  const out: SheetCell[][][] = [];
+  for (const range of ranges) {
+    if (range.kind === 'headers') out.push([await gateway.readHeaders(timeoutMs)]);
+    else if (range.kind === 'column')
+      out.push((await gateway.readColumn(range.index, timeoutMs)).map((value) => [value]));
+    else out.push([(await gateway.readRows([range.row], range.width ?? 200, timeoutMs))[0] ?? []]);
+  }
+  return out;
+}
+
+const column = (index: number): SheetRange => ({ kind: 'column', index });
+const rowRange = (row: number, width?: number): SheetRange => ({ kind: 'row', row, width });
+const columnValues = (range: SheetCell[][]): string[] =>
+  range.map((cells) => String(cells[0] ?? ''));
+const firstRow = (range: SheetCell[][] | undefined): SheetCell[] => range?.[0] ?? [];
+const headerValues = (range: SheetCell[][] | undefined): string[] =>
+  firstRow(range).map((value) => String(value ?? ''));
+
+function requireTracking(schema: SheetSchema) {
+  if (
+    schema.tracking.reportId === undefined ||
+    schema.tracking.reportStatus === undefined ||
+    schema.tracking.emailStatus === undefined
+  )
+    throw new Error('Required report tracking headers are missing');
+}
+
+/**
+ * The parsed header row, remembered per gateway (so per function instance). It is never trusted
+ * blindly: every request re-reads the header row INSIDE the same batched request that reads the
+ * columns it needs, and the remembered schema is used only if the headers are unchanged. If someone
+ * inserted or renamed a column the cache is dropped and the columns are read again, so a stale
+ * schema can never choose a column. The saving is the separate header request.
+ */
+const schemaCache = new WeakMap<SheetsGateway, { headers: string[]; schema: SheetSchema }>();
+
+async function readIndex(
+  gateway: SheetsGateway,
+): Promise<{ schema: SheetSchema; markers: string[]; emails: string[] }> {
+  const cached = schemaCache.get(gateway);
+  let headers: string[];
+  if (cached) {
+    const [h, markers, emails] = await readRanges(gateway, [
+      { kind: 'headers' },
+      column(cached.schema.tracking.reportId as number),
+      column(cached.schema.email),
+    ]);
+    headers = headerValues(h);
+    if (
+      headers.length === cached.headers.length &&
+      headers.every((value, i) => value === cached.headers[i])
+    )
+      return {
+        schema: cached.schema,
+        markers: columnValues(markers),
+        emails: columnValues(emails),
+      };
+  } else {
+    headers = headerValues((await readRanges(gateway, [{ kind: 'headers' }]))[0]);
+  }
+  const schema = parseSheetSchema(headers);
+  requireTracking(schema);
+  schemaCache.set(gateway, { headers, schema });
+  const [markers, emails] = await readRanges(gateway, [
+    column(schema.tracking.reportId as number),
+    column(schema.email),
+  ]);
+  return { schema, markers: columnValues(markers), emails: columnValues(emails) };
+}
+
 type EmailHistory = {
   /** Newest rows of this email (at most MAX_CANDIDATE_ROWS), oldest first. */
   candidates: number[];
@@ -146,15 +251,27 @@ function emailRowNumbers(emails: string[], target: string): number[] {
   return rowNumbers;
 }
 
-/** One column read plus one batch read: serves both the duplicate check and the limit check. */
+/**
+ * One batched read of this email's newest rows (nothing when it has none): serves both the duplicate
+ * check and the limit check. The email column is passed in when the caller already has it.
+ */
 async function readEmailHistory(
   gateway: SheetsGateway,
   schema: SheetSchema,
   email: string,
+  knownEmails?: string[],
 ): Promise<EmailHistory> {
-  const emails = await gateway.readColumn(schema.email);
+  const emails =
+    knownEmails ?? columnValues((await readRanges(gateway, [column(schema.email)]))[0]);
   const candidates = emailRowNumbers(emails, normalizeEmail(email)).slice(-MAX_CANDIDATE_ROWS);
-  const rows = candidates.length ? await gateway.readRows(candidates, schema.headers.length) : [];
+  const rows = candidates.length
+    ? (
+        await readRanges(
+          gateway,
+          candidates.map((n) => rowRange(n, schema.headers.length)),
+        )
+      ).map(firstRow)
+    : [];
   return { candidates, rows };
 }
 
@@ -221,24 +338,26 @@ function limitRetryAfter(
 }
 
 /**
- * Post-check for races. Sheets appends are atomic and ordered, so however many requests passed the
- * pre-check at the same time, each one's row has a distinct position. A row is over the limit when
- * the MAX_SUBMISSIONS_PER_EMAIL rows just before it (same email) are all inside the window. Rows
- * before it always exist already, so every racing request reaches the same verdict about itself.
+ * Rank check, for races. Each request appends its own row (INSERT_ROWS), so however many requests
+ * passed the pre-check at the same time their rows have distinct positions, and each request judges
+ * itself by the rows before it: it is over the limit when the MAX_SUBMISSIONS_PER_EMAIL rows just
+ * before it (same email) are all inside the window. `emails` is the email column as read AFTER the
+ * row exists. Google does not formally guarantee append ordering under heavy concurrency (see
+ * docs/handle-abuse.md), so this is a strong check, not an atomic lock.
  */
-async function overLimitAfterAppend(
+async function rankOverLimit(
   gateway: SheetsGateway,
   schema: SheetSchema,
+  emails: string[],
   email: string,
   rowNumber: number,
   nowSerial: number,
 ): Promise<number | null> {
-  const emails = await gateway.readColumn(schema.email);
   const upToMine = emailRowNumbers(emails, normalizeEmail(email)).filter((n) => n <= rowNumber);
   if (upToMine.length <= MAX_SUBMISSIONS_PER_EMAIL) return null;
   const anchor = upToMine[upToMine.length - 1 - MAX_SUBMISSIONS_PER_EMAIL];
-  const [row] = await gateway.readRows([anchor], schema.headers.length);
-  return secondsUntilFree(row?.[schema.timestamp], nowSerial);
+  const [range] = await readRanges(gateway, [rowRange(anchor, schema.headers.length)]);
+  return secondsUntilFree(firstRow(range)[schema.timestamp], nowSerial);
 }
 
 /** Epoch ms of a row's timestamp, derived from how old it is on the sheet's own clock. */
@@ -277,16 +396,10 @@ async function writeOnce(
   now: Date,
 ): Promise<SheetSaveResult> {
   const nowMs = now.getTime();
-  const schema = parseSheetSchema(await gateway.readHeaders());
-  if (
-    schema.tracking.reportId === undefined ||
-    schema.tracking.reportStatus === undefined ||
-    schema.tracking.emailStatus === undefined
-  )
-    throw new Error('Required report tracking headers are missing');
+  // One request: header row (validates the remembered schema), the marker column and the email column.
+  const { schema, markers, emails } = await readIndex(gateway);
   const timeZone = await gateway.getTimeZone().catch(() => FALLBACK_TIME_ZONE);
   const { text, serial } = wallClock(now, timeZone);
-  const markers = await gateway.readColumn(schema.tracking.reportId);
   const marker = `submission:${submission.id}`;
   const markedRows = markers.flatMap((value, index) =>
     index > 0 && value === marker ? [index + 1] : [],
@@ -294,7 +407,9 @@ async function writeOnce(
   if (markedRows.length > 1) throw new Error('Duplicate spreadsheet submission marker');
   if (markedRows.length === 1) {
     const rowNumber = markedRows[0];
-    const row = (await gateway.readRows([rowNumber], schema.headers.length))[0];
+    const row = firstRow(
+      (await readRanges(gateway, [rowRange(rowNumber, schema.headers.length)]))[0],
+    );
     const matchingEmail =
       normalizeEmail(String(row?.[schema.email] ?? '')) === normalizeEmail(submission.email);
     const matchingAnswers = questionIds.every(
@@ -305,10 +420,12 @@ async function writeOnce(
     if (!matchingEmail || !matchingAnswers)
       throw new Error('Submission marker does not match its spreadsheet row');
     // A request that lost a concurrent race for the last free slot left its row behind. Retrying
-    // with the same id must not turn that row into a harmless "duplicate": judge it by its position.
-    const retryAfterSeconds = await overLimitAfterAppend(
+    // with the same id must not turn that row into a harmless "duplicate": judge it by its position
+    // (the email column read above already contains the row).
+    const retryAfterSeconds = await rankOverLimit(
       gateway,
       schema,
+      emails,
       submission.email,
       rowNumber,
       serial,
@@ -331,7 +448,7 @@ async function writeOnce(
 
   // One read of this email's newest rows serves the duplicate check AND the limit check, and both
   // run before anything is appended (and, in the caller, before any AI call or report generation).
-  const history = await readEmailHistory(gateway, schema, submission.email);
+  const history = await readEmailHistory(gateway, schema, submission.email, emails);
   const existing = findRecentDuplicate(history, schema, submission, serial);
   if (existing)
     return {
@@ -350,18 +467,29 @@ async function writeOnce(
       retryAfterSeconds: waitSeconds,
     };
 
-  await gateway.appendRow(buildRow(submission, text, schema));
-  // Google's updatedCells counts updated cells, not a promise that every empty tracking
-  // placeholder was stored. Read back the unique marker and meaningful fields instead.
-  const after = await gateway.readColumn(schema.tracking.reportId);
-  const matches = after.flatMap((value, index) =>
+  const appended = await gateway.appendRow(buildRow(submission, text, schema));
+  // ONE request reads back everything the checks below need: the marker column (is the row there,
+  // exactly once?), the email column (rank among this email's rows) and, when Google reported which
+  // row it appended, that row (are the stored email and answers ours?). Google's updatedCells only
+  // counts cells, not a promise that every placeholder was stored, so the unique marker and the
+  // meaningful fields are read back instead.
+  const hint = appendedRowNumber(appended.updatedRange);
+  const [afterMarkers, afterEmails, hinted] = await readRanges(gateway, [
+    column(schema.tracking.reportId as number),
+    column(schema.email),
+    ...(hint ? [rowRange(hint, schema.headers.length)] : []),
+  ]);
+  const matches = columnValues(afterMarkers).flatMap((value, index) =>
     index > 0 && value === marker ? [index + 1] : [],
   );
   if (matches.length !== 1) throw new Error('Google Sheets did not confirm the write');
   const rowNumber = matches[0];
-  const row = (await gateway.readRows([rowNumber], schema.headers.length))[0];
+  const row =
+    hinted && hint === rowNumber
+      ? firstRow(hinted)
+      : firstRow((await readRanges(gateway, [rowRange(rowNumber, schema.headers.length)]))[0]);
   if (
-    !row ||
+    !row.length ||
     normalizeEmail(String(row[schema.email] ?? '')) !== normalizeEmail(submission.email) ||
     questionIds.some(
       (id) =>
@@ -372,12 +500,19 @@ async function writeOnce(
     throw new Error('Google Sheets did not confirm the write');
 
   // Concurrency: requests for the same email that raced past the pre-check are ranked by row order.
-  const lostRace = await overLimitAfterAppend(gateway, schema, submission.email, rowNumber, serial);
+  const lostRace = await rankOverLimit(
+    gateway,
+    schema,
+    columnValues(afterEmails),
+    submission.email,
+    rowNumber,
+    serial,
+  );
   if (lostRace !== null) {
     // Keep the row (the lead is not lost) but label it so it is not mistaken for a pending report.
     await gateway
       .writeCells(rowNumber, [
-        { index: schema.tracking.reportStatus, value: REJECTED_BY_LIMIT_LABEL },
+        { index: schema.tracking.reportStatus as number, value: REJECTED_BY_LIMIT_LABEL },
       ])
       .catch(() => undefined);
     return {
@@ -458,10 +593,16 @@ export async function markReportGenerated(
   rowNumber: number,
   timeoutMs?: number,
 ): Promise<boolean> {
-  const schema = parseSheetSchema(await gateway.readHeaders(timeoutMs));
+  // One request: the header row and this row.
+  const [headerRange, rowData] = await readRanges(
+    gateway,
+    [{ kind: 'headers' }, rowRange(rowNumber)],
+    timeoutMs,
+  );
+  const schema = parseSheetSchema(headerValues(headerRange));
   const statusColumn = schema.tracking.reportStatus;
   if (statusColumn === undefined) throw new Error('Required report tracking headers are missing');
-  const row = (await gateway.readRows([rowNumber], schema.headers.length, timeoutMs))[0];
+  const row = firstRow(rowData);
   const matches =
     row !== undefined &&
     normalizeEmail(String(row[schema.email] ?? '')) === normalizeEmail(submission.email) &&

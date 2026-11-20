@@ -9,9 +9,19 @@ import { fakeSheet, headers } from '../helpers/sheet-gateway.mjs';
  *  - live: a REAL, isolated Google spreadsheet (opt-in: `npm run test:live`, see docs/live-testing.md).
  * Both expose the same shape and count Sheets calls so quota use can be measured.
  */
-const READS = new Set(['getTimeZone', 'readHeaders', 'readColumn', 'readRows', 'readKeys']);
+const READS = new Set([
+  'getTimeZone',
+  'readHeaders',
+  'readColumn',
+  'readRows',
+  'batchRead',
+  'readKeys',
+]);
 
 function counted(gateway, stats, throttle) {
+  // The real gateway memoizes the spreadsheet time zone for the life of the instance, so only its
+  // first call is a Google request. The in-memory fake does not memoize: mirror that here.
+  let timeZoneRequested = false;
   return new Proxy(gateway, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
@@ -19,6 +29,10 @@ function counted(gateway, stats, throttle) {
       if (!READS.has(prop) && !['appendRow', 'append', 'writeCells'].includes(prop))
         return value.bind(target);
       return async (...args) => {
+        if (prop === 'getTimeZone') {
+          if (timeZoneRequested) return value.apply(target, args);
+          timeZoneRequested = true;
+        }
         if (throttle) await throttle();
         stats[READS.has(prop) ? 'reads' : 'writes'] += 1;
         return value.apply(target, args);

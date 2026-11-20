@@ -23,7 +23,7 @@ GOOGLE_CLIENT_EMAIL=... GOOGLE_PRIVATE_KEY=... npm run test:live
 
 It takes several minutes (the throttle). Scenarios: the 6th submission, the rolling 24-hour window, 8
 concurrent submissions, duplicates (cached, uncached, window over), the 6th download, and 10 parallel
-downloads over 3 simulated instances. It prints the real number of Sheets calls and the time per request.
+downloads over 3 simulated instances. It prints the real number of Sheets requests and the time per request. Expected after the quota optimization (`docs/sheets-quota.md`): 4 reads + 2 writes per accepted submission, 2 reads for a refused 6th, 1 read + 1 write per delivered download. If the live numbers are higher, the consolidation is not behaving as the fakes suggest.
 
 **The service account of this project cannot create spreadsheets** (Google answered "The caller does not
 have permission" when this was tried), so the run needs a spreadsheet you create: make an empty one

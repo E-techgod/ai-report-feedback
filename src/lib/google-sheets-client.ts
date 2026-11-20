@@ -1,9 +1,31 @@
 import { google } from 'googleapis';
 import type { LedgerGateway } from './download-ledger';
 import { columnLetter } from './sheet-schema';
-import { SHEET_TAB, type SheetCell, type SheetsGateway } from './sheets';
+import {
+  SHEET_TAB,
+  appendedRowNumber,
+  type SheetCell,
+  type SheetRange,
+  type SheetsGateway,
+} from './sheets';
 
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * The Google client retries GET/PUT requests 3 times by default, including on 429 (quota). Quotas are
+ * per minute, so a retry 100-400 ms later cannot succeed; it only multiplies the load (a failed read
+ * becomes 4 requests) while the quota is exhausted. 429 is therefore NOT retried: the app fails fast
+ * (503 + Retry-After) and the person retries. Timeouts and 5xx keep the default retries.
+ */
+const RETRY: { retryConfig: { statusCodesToRetry: number[][] } } = {
+  retryConfig: {
+    statusCodesToRetry: [
+      [100, 199],
+      [408, 408],
+      [500, 599],
+    ],
+  },
+};
 const tab = `'${SHEET_TAB}'`;
 
 /** Env files often store the key quoted and with literal "\n" sequences. */
@@ -11,7 +33,9 @@ export function normalizePrivateKey(raw: string): string {
   return raw.trim().replace(/^"|"$/g, '').replace(/\\n/g, '\n');
 }
 
-function googleSheetsClient() {
+export type GoogleSheetsClient = NonNullable<ReturnType<typeof googleSheetsClient>>;
+
+export function googleSheetsClient() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
   const privateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -25,13 +49,18 @@ function googleSheetsClient() {
   return { spreadsheetId, sheets: google.sheets({ version: 'v4', auth }) };
 }
 
-/**
- * Row number of an append, from the A1 range Google reports, e.g. `'Control de descargas'!A42:B42`
- * (or `Sheet1!A7` for a single cell). 0 when the range cannot be understood.
- */
-export function appendedRowNumber(range: string | null | undefined): number {
-  const match = /!\$?[A-Z]+\$?(\d+)(?::\$?[A-Z]+\$?(\d+))?$/.exec(range ?? '');
-  return match ? Number(match[2] ?? match[1]) : 0;
+export { appendedRowNumber };
+
+/** A1 notation of one batched range in the response tab. */
+export function rangeA1(range: SheetRange): string {
+  if (range.kind === 'headers') return `${tab}!1:1`;
+  if (range.kind === 'column') {
+    const letter = columnLetter(range.index);
+    return `${tab}!${letter}:${letter}`;
+  }
+  return range.width
+    ? `${tab}!A${range.row}:${columnLetter(range.width - 1)}${range.row}`
+    : `${tab}!${range.row}:${range.row}`;
 }
 
 /** Name of the ledger tab that counts delivered PDF downloads (see download-ledger.ts). */
@@ -46,7 +75,7 @@ export function createGoogleLedgerGateway(): LedgerGateway | null {
   const client = googleSheetsClient();
   if (!client) return null;
   const { spreadsheetId, sheets } = client;
-  const options = { timeout: REQUEST_TIMEOUT_MS };
+  const options = { timeout: REQUEST_TIMEOUT_MS, ...RETRY };
 
   const titleExists = async () => {
     const { data } = await sheets.spreadsheets.get(
@@ -117,13 +146,16 @@ export function createGoogleLedgerGateway(): LedgerGateway | null {
   };
 }
 
-export function createGoogleSheetsGateway(): SheetsGateway | null {
-  const client = googleSheetsClient();
+/** `client` can be injected (tests point it at a local server to count real HTTP requests). */
+export function createGoogleSheetsGateway(
+  client: GoogleSheetsClient | null = googleSheetsClient(),
+): SheetsGateway | null {
   if (!client) return null;
   const { spreadsheetId, sheets } = client;
-  const options = { timeout: REQUEST_TIMEOUT_MS };
+  const options = { timeout: REQUEST_TIMEOUT_MS, ...RETRY };
   const timed = (timeoutMs?: number) => ({
     timeout: Math.min(REQUEST_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs ?? REQUEST_TIMEOUT_MS))),
+    ...RETRY,
   });
   let timeZone: string | undefined;
 
@@ -154,6 +186,23 @@ export function createGoogleSheetsGateway(): SheetsGateway | null {
         timed(timeoutMs),
       );
       return (data.values ?? []).map((row) => String(row[0] ?? ''));
+    },
+
+    async batchRead(ranges, timeoutMs) {
+      // ONE values.batchGet request for every range: Google counts requests, not ranges.
+      const { data } = await sheets.spreadsheets.values.batchGet(
+        {
+          spreadsheetId,
+          ranges: ranges.map(rangeA1),
+          valueRenderOption: 'UNFORMATTED_VALUE',
+          dateTimeRenderOption: 'SERIAL_NUMBER',
+        },
+        timed(timeoutMs),
+      );
+      const valueRanges = data.valueRanges ?? [];
+      if (valueRanges.length !== ranges.length)
+        throw new Error('Google Sheets returned fewer ranges');
+      return valueRanges.map((range) => (range.values ?? []) as SheetCell[][]);
     },
 
     async readRows(rowNumbers, width, timeoutMs) {

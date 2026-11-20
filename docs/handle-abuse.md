@@ -159,7 +159,7 @@ the Sheets quota, which is what the in-app limits cannot do on their own.
 per 60 seconds**, fixed window, keyed by IP, default `429` when exceeded. It is deliberately generous: it
 does not slow a real person or an office or school sharing one IP, and only cuts off scripted floods. The
 real per-person limits stay in the app (5 submissions per email per 24 hours, 5 downloads per report).
-Because a request that reaches the app can cost up to ~12 Sheets calls, a single IP at the ceiling could
+Because a request that reaches the app can cost up to ~6 Sheets requests, a single IP at the ceiling could
 still use a large share of Google's per-minute quota, so this rule is a flood brake, not a quota
 guarantee. It is activated only after the integration tests and PR review, with explicit approval.
 
@@ -214,19 +214,20 @@ quota behavior. Outcomes of that review, including the problems it found:
 | Google quota (`429`) while saving a submission                     | **Found and fixed:** used to be an opaque `502`. Now a `503` with `Retry-After: 60`, a friendly message and a `sheets_unavailable` log with `reason: quota`                                                                                                                                         |
 | Google quota or outage while counting a download                   | `503`, fails closed, reason logged; the grant works again when Google recovers                                                                                                                                                                                                                      |
 | Budget spent but the app keeps asking Google                       | **Found and fixed:** after the 5th delivery the 6th attempt cost a render and 2 Google calls; it now costs none (remembered in memory)                                                                                                                                                              |
+| Too many Sheets requests per submission (10 reads + 2 writes)      | **Found and fixed:** consolidated into batched requests, 4 reads + 2 writes, with a validated header cache; see [`docs/sheets-quota.md`](./sheets-quota.md)                                                                                                                                         |
+| Google client retries a read 3 times on `429`                      | **Found and fixed:** a failed read cost 4 requests while the quota was already exhausted; `429` is no longer retried (timeouts and `5xx` still are)                                                                                                                                                 |
+| Quota hit after the row was written but before it was confirmed    | The person gets `503` but the row exists and counts; the retry gets the duplicate `409` until the 10-minute window passes. Exposure is now one request, not three                                                                                                                                   |
 | Two writers get the same row (an overwrite)                        | Cannot be ruled out from Google's documentation. The submission path detects it (marker and answers are read back and must match). Two **downloads of the same grant** overwriting one row would be seen as one, so at most one extra PDF could be delivered. Not observed in testing, not provable |
 | Rows sorted, inserted or deleted in the response tab               | The email limit judges by row order: do not sort or insert rows. Deleting a row frees a slot                                                                                                                                                                                                        |
 | Instance clocks differ by seconds                                  | Harmless: the window is 24 hours and each request judges against its own clock                                                                                                                                                                                                                      |
 
-**Quota, measured.** Counting the Sheets calls the code makes (same count with the fake and the real
-client, because the fake sits behind the same interface): an accepted submission costs about **10
-reads and 2 writes** (including the status update after the response), a refused 6th submission about
-5 reads, a delivered download 1 read + 1 write, and a download refused from memory 0. Google's default
-quota is on the order of 60 read requests per minute per user per project (confirm in your Cloud
-console), so the app sustains roughly **6 accepted submissions per minute** before Google answers `429`
-(which the app now reports as `503`). Reducing this (for example caching the header row for a few
-seconds) is possible but changes read-after-write assumptions, so it was not done. If you expect bursts
-above that rate, ask for a higher Sheets quota or put a queue in front.
+**Quota.** Google counts API requests, not ranges, and the app's single service account is limited to
+60 read and 60 write requests per minute. After the consolidation in [`docs/sheets-quota.md`](./sheets-quota.md),
+an accepted submission costs **4 reads + 2 writes** (3 + 2 for a first-time email; it was 10 + 2), a
+refused 6th submission 2 reads, a delivered download 1 read + 1 write and a download refused from memory 0. That is roughly 12-15 completed respondents per minute (about 700-900 per hour) if arrivals are
+spread out; a burst in a single minute is what exhausts the quota. A Google `429` is not retried by the
+client (a retry 100 ms later cannot beat a per-minute quota); it becomes a `503` with `Retry-After`.
+That page also lists what remains unverified.
 
 ## What to do when...
 
@@ -355,9 +356,10 @@ None of these is hidden by the code.
   typed by hand) are ignored by the window.
 - **Race losers keep a labelled row** and it keeps counting toward the window. That can only make the
   limit slightly stricter, never looser.
-- **Sheets API cost and quota.** About 10 reads and 2 writes per accepted submission (measured, see the
-  review above) against Google's per-user quota of roughly 60 reads per minute, so around 6 submissions
-  per minute sustained; beyond that, saving fails with `503`. Only the Firewall rule keeps floods away
+- **Sheets API cost and quota.** 4 reads and 2 writes per accepted submission (3 + 2 for a new email,
+  see [`docs/sheets-quota.md`](./sheets-quota.md)) against the service account's quota of 60 reads and
+  60 writes per minute, so about 12-15 respondents per minute sustained; beyond that, saving fails with
+  `503`. Only the Firewall rule keeps floods away
   from it, and Production shares this quota with anything else using the same service account.
 - **Not an atomic lock.** Both limits rely on Google giving each `INSERT_ROWS` append its own row in
   arrival order. That is documented behavior but not a formal guarantee under heavy concurrency, so the
