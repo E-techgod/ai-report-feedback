@@ -185,12 +185,14 @@ const firstRow = (range: SheetCell[][] | undefined): SheetCell[] => range?.[0] ?
 const headerValues = (range: SheetCell[][] | undefined): string[] =>
   firstRow(range).map((value) => String(value ?? ''));
 
+/**
+ * Only the columns the app really uses are required: `ID Reporte` (submission marker) and
+ * `Estado Reporte`. The email, CSV, date and error tracking columns left over from the old Apps Script
+ * pipeline are optional and can be deleted from the sheet; `Estado/Fecha Descarga PDF` are optional too
+ * (without them the download is simply not recorded in the row).
+ */
 function requireTracking(schema: SheetSchema) {
-  if (
-    schema.tracking.reportId === undefined ||
-    schema.tracking.reportStatus === undefined ||
-    schema.tracking.emailStatus === undefined
-  )
+  if (schema.tracking.reportId === undefined || schema.tracking.reportStatus === undefined)
     throw new Error('Required report tracking headers are missing');
 }
 

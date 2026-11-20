@@ -174,3 +174,71 @@ test('markPdfDownloaded finds the row even after rows were inserted above it', a
   assert.equal(s.sheet.rows[2][PDF_STATUS], PDF_DOWNLOADED_LABEL);
   assert.equal(s.sheet.rows[1][PDF_STATUS], 'otra fila', 'the other row is untouched');
 });
+
+/** Headers still used by the app; everything else of the old Apps Script pipeline is optional. */
+const UNUSED = [
+  'Estado Email',
+  'Estado Descarga CSV',
+  'Fecha Generación',
+  'Fecha Envío',
+  'Fecha Descarga CSV',
+  'Último Error',
+  'Intentos Email',
+];
+
+test('the pipeline works after the unused tracking columns are deleted from the sheet', async () => {
+  const c = questionnaireContext();
+  c.sheet.rows[0] = headers.filter((h) => !UNUSED.includes(h));
+  const response = await handleQuestionnaire(post(submission()), c.ctx);
+  assert.equal(response.status, 200);
+  const { report, download } = await response.json();
+  await c.flush();
+  const h = c.sheet.rows[0];
+  assert.equal(c.sheet.rows[1][h.indexOf('Estado Reporte')], 'Generado');
+
+  const tasks = [];
+  const served = await handlePdfDownload(
+    new Request('https://example.com/api/report/pdf', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-download-token': download.token },
+      body: JSON.stringify(report),
+    }),
+    {
+      secret: SECRET,
+      renderPdf: async () => Buffer.from('%PDF-fake'),
+      limiter: freshLimiter().limiter,
+      now: () => new Date(T0 + 1_000),
+      trackDownload: (r, at) => markPdfDownloaded(c.sheet, r.submissionId, at),
+      schedule: (task) => tasks.push(task),
+    },
+  );
+  assert.equal(served.status, 200);
+  for (const task of tasks) await task();
+  assert.equal(c.sheet.rows[1][h.indexOf('Estado Descarga PDF')], PDF_DOWNLOADED_LABEL);
+  assert.equal(c.sheet.rows[1][h.indexOf('Fecha Descarga PDF')], '2026-11-19 06:00:01');
+});
+
+test('the columns the app really depends on are still required', async () => {
+  for (const missing of ['ID Reporte', 'Estado Reporte']) {
+    const c = questionnaireContext();
+    c.sheet.rows[0] = headers.filter((h) => h !== missing);
+    const response = await handleQuestionnaire(post(submission()), c.ctx);
+    assert.equal(
+      response.status,
+      502,
+      `${missing} missing must refuse, not write to a shifted column`,
+    );
+    assert.equal(c.sheet.appends, 0, 'nothing is appended');
+  }
+});
+
+test('without the PDF tracking columns the download works and nothing is written', async () => {
+  const s = await setup();
+  s.sheet.rows[0] = headers.filter(
+    (h) => h !== 'Estado Descarga PDF' && h !== 'Fecha Descarga PDF',
+  );
+  const response = await s.downloadPdf(1_000);
+  assert.equal(response.status, 200);
+  await assert.doesNotReject(s.flush());
+  assert.equal(s.sheet.writes.length, 0);
+});
