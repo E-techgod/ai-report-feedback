@@ -17,7 +17,8 @@ export type SecurityEvent =
   | 'download_limit_reached'
   | 'download_limit_unavailable'
   | 'download_expired'
-  | 'download_unauthorized';
+  | 'download_unauthorized'
+  | 'sheets_unavailable';
 
 const ALLOWED_FIELDS = new Set([
   'subject',
@@ -41,6 +42,7 @@ const WARN_EVENTS = new Set<SecurityEvent>([
   'download_limit_unavailable',
   'download_expired',
   'download_unauthorized',
+  'sheets_unavailable',
 ]);
 
 export function sanitizeFields(

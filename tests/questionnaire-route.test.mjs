@@ -190,7 +190,7 @@ test("another submission's grant cannot download this client's report", async ()
 test('a failed Sheet write issues no grant and never calls the AI', async () => {
   const { h, sheet, ctx } = context();
   sheet.appendRow = async () => {
-    throw new Error('quota exceeded');
+    throw new Error('sheet exploded');
   };
   const originalError = console.error;
   console.error = () => {};
@@ -346,7 +346,7 @@ test('if the row moved or changed, nothing is written', async () => {
 test('failed submissions leave Estado Reporte as Pendiente and schedule nothing', async () => {
   const failedSheet = context();
   failedSheet.sheet.appendRow = async () => {
-    throw new Error('quota exceeded');
+    throw new Error('sheet exploded');
   };
   await silenced(() => handleQuestionnaire(request(submission()), failedSheet.ctx));
   assert.equal(failedSheet.tasks.length, 0);

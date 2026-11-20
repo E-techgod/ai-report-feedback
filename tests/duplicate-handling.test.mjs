@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { downloadLedgerKey, verifyDownloadGrant } from '../src/lib/download-grant.ts';
+import { downloadLedgerKey } from '../src/lib/download-grant.ts';
 import { handleQuestionnaire } from '../src/lib/questionnaire-handler.ts';
 import { createReportCache } from '../src/lib/report-cache.ts';
 import { handlePdfDownload } from '../src/lib/report-pdf-handler.ts';
@@ -39,27 +39,42 @@ test('a retry of the same submission gets the same report and grant back, with n
   assert.equal(events()[0].outcome, 'served_cached_report');
 });
 
-test('when this instance has no cached report, a duplicate gets labelled template text: still no AI call', async () => {
+test('a duplicate this instance cannot reproduce is refused with a clear error: no template, no AI call, no grant', async () => {
   const { h, sheet, ctx } = questionnaireContext();
   const input = submission();
   const first = await (await send(ctx, input)).json();
+  assert.equal(first.report.narrativeSource, 'ai');
   h.clock.t += 60_000;
-  // A different instance / a cold start: the report cache is empty.
-  const { result: response } = await quiet(() =>
+  // Another instance / a cold start: its report cache is empty and nothing is stored anywhere.
+  const { result: response, events } = await quiet(() =>
     send({ ...ctx, reportCache: createReportCache() }, input),
   );
-  const retry = await response.json();
-  assert.equal(retry.ok, true);
+  const body = await response.json();
+  assert.equal(response.status, 409);
+  assert.equal(body.ok, false);
+  assert.equal(body.duplicate, true);
+  assert.equal(body.code, 'duplicate_report_unavailable');
+  assert.ok(!('report' in body) && !('download' in body), 'no report and no new grant');
+  assert.match(body.error, /no podemos volver a mostrarte el mismo informe/);
+  assert.match(body.error, /sigue|seguir descargándolo hasta que termine su ventana de 5 minutos/);
+  assert.match(body.error, /Podrás generar un informe nuevo en 9 minutos/);
   assert.equal(h.narrativeCalls.length, 1, 'the AI was only called for the original');
-  assert.equal(retry.report.narrativeSource, 'template');
   assert.equal(sheet.appends, 1);
-  // It belongs to the ORIGINAL submission and ends when the original window ends.
-  assert.equal(retry.report.submissionId, first.report.submissionId);
-  assert.equal(retry.download.expiresInMs, 5 * MIN - 60_000);
-  assert.equal(
-    verifyDownloadGrant(retry.report, retry.download.token, SECRET, new Date(h.clock.t)),
-    'ok',
+  assert.equal(events()[0].outcome, 'refused_report_unavailable');
+});
+
+test('the same holds for a page refresh (new id, same answers) on an instance without the report', async () => {
+  const { h, sheet, ctx } = questionnaireContext();
+  const input = submission();
+  await send(ctx, input);
+  h.clock.t += 30_000;
+  const { result: response } = await quiet(() =>
+    send({ ...ctx, reportCache: createReportCache() }, { ...input, id: crypto.randomUUID() }),
   );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, 'duplicate_report_unavailable');
+  assert.equal(h.narrativeCalls.length, 1);
+  assert.equal(sheet.appends, 1);
 });
 
 test('a duplicate after the five minutes is refused (409): nothing is regenerated or retrievable', async () => {
@@ -96,21 +111,24 @@ test('after the 10-minute duplicate window the survey can be taken again as a ne
   assert.equal(h.narrativeCalls.length, 2);
 });
 
-test('repeating the survey cannot multiply downloads: duplicates share the original five', async () => {
+test('the original report, its grant and its five downloads are preserved for a duplicate', async () => {
   const { h, ctx } = questionnaireContext();
   const input = submission();
   const original = await (await send(ctx, input)).json();
   h.clock.t += 30_000;
-  const { result } = await quiet(() =>
-    send({ ...ctx, reportCache: createReportCache() }, { ...input, id: crypto.randomUUID() }),
-  );
+  const { result } = await quiet(() => send(ctx, { ...input, id: crypto.randomUUID() }));
   const repeat = await result.json();
-  assert.notEqual(repeat.download.token, original.download.token, 'different report, new token');
+  // Identical feedback and the identical grant: nothing was regenerated or re-signed.
+  assert.deepEqual(repeat.report, original.report);
+  assert.equal(repeat.report.narrativeSource, 'ai');
+  assert.equal(repeat.download.token, original.download.token);
   assert.equal(
     downloadLedgerKey(repeat.report, SECRET),
     downloadLedgerKey(original.report, SECRET),
   );
+  assert.equal(h.narrativeCalls.length, 1);
 
+  // And only ONE budget of five downloads exists for the two responses together.
   const { limiter } = freshLimiter();
   const run = (body) =>
     handlePdfDownload(
@@ -128,7 +146,7 @@ test('repeating the survey cannot multiply downloads: duplicates share the origi
     );
   const statuses = [];
   await quiet(async () => {
-    for (const body of [original, original, original, repeat, repeat, repeat, original])
+    for (const body of [original, repeat, original, repeat, original, repeat, original])
       statuses.push((await run(body)).status);
   });
   assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429, 429]);
@@ -151,7 +169,7 @@ test('a duplicate whose original is still being served never extends the deadlin
 test('a Sheet failure while checking for duplicates still issues nothing and calls no AI', async () => {
   const { h, sheet, ctx } = questionnaireContext();
   sheet.readColumn = async () => {
-    throw new Error('quota exceeded');
+    throw new Error('sheet exploded');
   };
   const error = console.error;
   console.error = () => {};

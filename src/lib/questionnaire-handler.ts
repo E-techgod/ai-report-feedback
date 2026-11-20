@@ -11,9 +11,9 @@ import {
 import { DOWNLOAD_WINDOW_MS, issueDownloadGrant } from './download-grant';
 import type { FinalReport } from './final-report';
 import { generateReport, type ReportDeps } from './generate-report';
-import { fallbackNarrative } from './report';
 import { defaultReportCache, type ReportCache } from './report-cache';
 import { logSecurityEvent, subjectFingerprint } from './security-log';
+import { classifySheetsError } from './sheets-errors';
 import { NO_STORE } from './services';
 
 const MAX_BODY_BYTES = 10_000;
@@ -44,12 +44,12 @@ export const limitMessage = (seconds: number) =>
  * grant is issued only after BOTH the Sheet write and the report generation succeeded.
  *
  * Duplicates (same submission id, or same email + answers within DUPLICATE_WINDOW_MINUTES) never
- * call the AI again and never open a new download window:
- *  - the window of a duplicate ends where the original's ended (so repeating cannot extend it);
- *  - inside it, the same instance hands back the report it just generated (`reportCache`),
- *    otherwise the approved template text is used (no AI call, labelled as template);
- *  - once the window is over the duplicate is refused (409): there is no way to retrieve or
- *    regenerate a report afterwards.
+ * call the AI again, never produce different feedback and never open a new download window:
+ *  - if this instance still holds the report it generated (`reportCache`, in memory, only for the
+ *    5-minute window) the duplicate gets exactly that report and the same deadline;
+ *  - otherwise the original cannot be reproduced without persistent storage, so the duplicate is
+ *    refused with a clear 409 (there is no template or regenerated substitute);
+ *  - once the window is over it is refused too: nothing can be retrieved or regenerated afterwards.
  */
 export async function handleQuestionnaire(
   req: Request,
@@ -93,6 +93,18 @@ export async function handleQuestionnaire(
     // Log only a short message: Google client errors can embed request details.
     const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
     console.error('[questionnaire] Google Sheets write failed:', message);
+    const failure = classifySheetsError(error);
+    logSecurityEvent('sheets_unavailable', { subject, reason: failure, outcome: 'submission' });
+    if (failure === 'quota')
+      return json(
+        {
+          ok: false,
+          code: 'service_busy',
+          error: 'Estamos recibiendo muchas solicitudes. Inténtalo de nuevo en unos minutos.',
+        },
+        503,
+        { 'retry-after': '60' },
+      );
     return json(
       { ok: false, error: 'No se pudo guardar tu diagnóstico. Intenta nuevamente.' },
       502,
@@ -120,55 +132,51 @@ export async function handleQuestionnaire(
     );
   }
 
-  // Step 2: the finalized report and its download grant. Retrying the same submission id is safe:
-  // the Sheet already has the row, so at most the report is produced again (without the AI).
+  // Step 2: the finalized report and its download grant.
   try {
     const duplicate = saved.status === 'duplicate';
     const nowMs = clock().getTime();
     const cached = duplicate ? reportCache.get(saved.submissionId, nowMs) : undefined;
 
-    // Where the download window opens. Fresh report: when it is ready (set below). Repeated
-    // submission: wherever the original's window opened, so repeating never extends the deadline.
-    let windowStartMs = duplicate ? (cached?.startedAtMs ?? saved.submittedAtMs) : nowMs;
-
-    if (duplicate && windowStartMs + DOWNLOAD_WINDOW_MS <= nowMs) {
-      logSecurityEvent('submission_duplicate', { subject, outcome: 'refused_window_over' });
+    // A repeated submission is only ever answered with the ORIGINAL report (same text, same
+    // deadline, same download budget). Reports are not stored, so if this instance does not hold
+    // it there is nothing safe to hand back: no new AI call, no different feedback, no new window.
+    if (duplicate && !cached) {
+      const windowOver = saved.submittedAtMs + DOWNLOAD_WINDOW_MS <= nowMs;
+      logSecurityEvent('submission_duplicate', {
+        subject,
+        outcome: windowOver ? 'refused_window_over' : 'refused_report_unavailable',
+      });
       const waitSeconds = Math.ceil(
         (saved.submittedAtMs + DUPLICATE_WINDOW_MINUTES * 60_000 - nowMs) / 1000,
       );
+      const next =
+        waitSeconds > 0
+          ? `Podrás generar un informe nuevo en ${waitText(waitSeconds)}.`
+          : 'Actualiza la página y vuelve a enviar el cuestionario para generar un informe nuevo.';
       return json(
         {
           ok: false,
           duplicate: true,
-          error:
-            'Ya recibimos este diagnóstico y su ventana de descarga de 5 minutos terminó. ' +
-            (waitSeconds > 0
-              ? `Podrás generar un informe nuevo en ${waitText(waitSeconds)}.`
-              : 'Actualiza la página y vuelve a enviar el cuestionario para generar un informe nuevo.'),
+          code: windowOver ? 'duplicate_window_over' : 'duplicate_report_unavailable',
+          error: windowOver
+            ? `Ya recibimos este diagnóstico y su ventana de descarga de 5 minutos terminó. ${next}`
+            : 'Ya recibimos este diagnóstico, pero no podemos volver a mostrarte el mismo informe desde aquí. ' +
+              'Si todavía tienes abierta la página con tu informe, puedes seguir descargándolo hasta que ' +
+              `termine su ventana de 5 minutos. ${next}`,
         },
         409,
       );
     }
 
     let report: FinalReport;
+    // Where the download window opens. Fresh report: when it is ready (set below). Cached report:
+    // wherever the original's window opened, so repeating never extends the deadline.
+    let windowStartMs = nowMs;
     if (cached) {
       report = cached.report;
+      windowStartMs = cached.startedAtMs;
       logSecurityEvent('submission_duplicate', { subject, outcome: 'served_cached_report' });
-    } else if (duplicate) {
-      // No AI call for a repeated submission: approved template text, labelled as such. The report
-      // keeps the ORIGINAL submission id, so it shares that submission's download budget.
-      report = await generateReport(
-        {
-          ...deps,
-          generateNarrative: async (model) => ({
-            narrative: fallbackNarrative(model),
-            source: 'template',
-            failureReason: 'duplicate-submission',
-          }),
-        },
-        { ...submission, id: saved.submissionId },
-      );
-      logSecurityEvent('submission_duplicate', { subject, outcome: 'served_template_report' });
     } else {
       report = await generateReport(deps, submission);
       // The window opens when the report is READY, so a slow AI call never eats into it.
@@ -208,7 +216,7 @@ export async function handleQuestionnaire(
         ok: false,
         saved: true,
         error:
-          'Tus respuestas se guardaron, pero no pudimos generar el informe. Intenta nuevamente.',
+          'Tus respuestas se guardaron, pero no pudimos generar el informe. Espera unos minutos y vuelve a enviar el cuestionario.',
       },
       502,
     );

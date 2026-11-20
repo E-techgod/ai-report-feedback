@@ -17,13 +17,13 @@ perfectly, this document says so ([Limitations](#limitations-read-this)).
 
 ## At a glance
 
-| What                      | Limit                                          | Enforced by                        | Over the limit                    |
-| ------------------------- | ---------------------------------------------- | ---------------------------------- | --------------------------------- |
-| Submissions per email     | **5 per rolling 24 hours**                     | the app, against the Sheet         | `429` + `Retry-After`, no AI call |
-| Downloads per submission  | **5 successful**, only within the 5-min window | the app, against the ledger tab    | `429`                             |
-| Download window           | **5 minutes** from when the report is ready    | signed token (HMAC)                | `410` expired                     |
-| Repeating the same survey | same email + answers within **10 minutes**     | the app, against the Sheet         | no AI call, no new window         |
-| Requests per IP           | **10 per minute** on `/api/questionnaire`      | **Vercel Firewall (to be set up)** | `429` from Vercel                 |
+| What                      | Limit                                          | Enforced by                        | Over the limit                                                                  |
+| ------------------------- | ---------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------- |
+| Submissions per email     | **5 per rolling 24 hours**                     | the app, against the Sheet         | `429` + `Retry-After`, no AI call                                               |
+| Downloads per submission  | **5 successful**, only within the 5-min window | the app, against the ledger tab    | `429`                                                                           |
+| Download window           | **5 minutes** from when the report is ready    | signed token (HMAC)                | `410` expired                                                                   |
+| Repeating the same survey | same email + answers within **10 minutes**     | the app, against the Sheet         | the **same report** again (same instance) or a clear `409`; never a new AI call |
+| Requests per IP           | **10 per minute** on `/api/questionnaire`      | **Vercel Firewall (to be set up)** | `429` from Vercel                                                               |
 
 ## 1. Submissions: 5 per email per rolling 24 hours
 
@@ -50,37 +50,55 @@ Google Sheets has no transactions or "compare and set". If the app only counted 
 ten simultaneous requests could all count 4 and all write. So the check runs twice:
 
 1. **Before appending** (cheap refusal in the normal case).
-2. **After appending**: the new row's position among that email's rows is read back. Sheets appends
-   are atomic and ordered, so concurrent requests get different rows. A row is accepted only if fewer
-   than 5 same-email rows inside the window come before it. Rows before it always exist already, so
-   every racing request reaches a consistent verdict: **exactly 5 win**, the rest get `429`.
+2. **After appending**: the new row's position among that email's rows is read back. The app writes
+   with `insertDataOption: INSERT_ROWS`, which gives every request its own new row in the order Google
+   receives them. A row is accepted only if fewer than 5 same-email rows inside the window come before
+   it. Rows before it already exist when it is judged, so racing requests reach consistent verdicts
+   and **5 win, the rest get `429`**.
+
+**What this relies on, and what it does not guarantee.** It relies on Google giving each append its
+own row, in arrival order. Google documents this behavior for `INSERT_ROWS` but does not publish a
+formal guarantee under heavy concurrency, so this is **not an atomic lock** and is not claimed to be
+one. The code does not blindly trust it: it reads the row back and checks the unique submission marker
+and answers before accepting a write, and it fails the request if they do not match. The failure modes
+that were analysed (ambiguous writes, failed requests, quota) are listed in
+[Concurrency and failure review](#concurrency-and-failure-review).
 
 A request that loses the race keeps its row (the lead is not lost), marked `Estado Reporte =
-Rechazado por límite`. If it retries with the same submission id it is judged by the same rule again;
-it is **not** treated as a harmless duplicate.
+Rechazado por límite`. If it retries with the same submission id, or sends the same answers again, it
+is judged by the limit again; it is **not** treated as a harmless duplicate.
 
-## 2. Duplicates: no AI call, no second window
+## 2. Duplicates: the same report, or a clear error. Never different feedback
 
 A **duplicate** is the same submission id (a retry or double click) or the same email with identical
 answers within 10 minutes (for example a page refresh and redo). Duplicates add no Sheet row, so they
 never count toward the 5-per-day limit.
 
-Before this change a duplicate called the AI again and received a brand-new 5-minute window (a way to
-regenerate a report after it expired). Now:
+**Rule: a report's AI-generated feedback is never replaced, regenerated or approximated.** Reports are
+not stored anywhere (no database, no stored PDF), so the only copy of the original that the server can
+ever hand back is a short-lived in-memory one on the instance that generated it. Therefore:
 
-- **No AI call.** The Sheet already answers "is this a duplicate?" before any report is generated.
-- **No new window.** A duplicate's window ends where the original's ended, and it shares the
-  original's 5 downloads. Repeating the survey can never extend a deadline or multiply downloads.
-- **Inside the window** the same server instance hands back the report it just generated (a short
-  in-memory cache that dies with the window; nothing is written anywhere). On another instance, or
-  after a cold start, there is no cached report, so the duplicate gets a report built from the
-  **approved template text** (no AI call), clearly labelled as template text. This is a deliberate
-  trade-off: a legitimate user always gets a PDF inside the window, and nobody can spend AI calls by
-  repeating a form.
-- **After the window** the duplicate is refused with `409`: _"Ya recibimos este diagnóstico y su
-  ventana de descarga de 5 minutos terminó..."_, plus how long until a new report can be requested.
-  There is no way to retrieve or regenerate a report after it expired. After the 10-minute duplicate
-  window, the same answers count as a new submission (and use one of the 5 daily slots).
+| Situation                                                        | Result                                                                                         |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Duplicate, this instance still holds the original (< 5 min)      | **The identical report and the identical grant** (same token, same deadline, same 5 downloads) |
+| Duplicate, a different instance or a cold start (no cached copy) | **`409`** `duplicate_report_unavailable`: no report, no new grant, no AI call                  |
+| Duplicate after the 5-minute window                              | **`409`** `duplicate_window_over`: nothing can be retrieved or regenerated afterwards          |
+| Same answers after the 10-minute duplicate window                | A **new submission** (counts toward the 5 per day, calls the AI once)                          |
+
+The `409` for an uncached duplicate says, in Spanish: _"Ya recibimos este diagnóstico, pero no podemos
+volver a mostrarte el mismo informe desde aquí. Si todavía tienes abierta la página con tu informe,
+puedes seguir descargándolo hasta que termine su ventana de 5 minutos. Podrás generar un informe nuevo
+en N minutos."_ The original page keeps working: its grant, its 5-minute deadline and its 5-download
+budget are untouched.
+
+Consequences to be aware of (a deliberate choice, see [Limitations](#limitations-read-this)):
+
+- A person whose **first** attempt failed after the row was saved (Google timeout, a function killed
+  mid-generation) and who retries will also get this `409`: the server cannot prove, without storing
+  anything, that no report was ever shown, so it will not generate a second one. They can resubmit
+  after the 10-minute duplicate window.
+- The in-memory copy holds the report (answers-derived content and first name) for at most the
+  5-minute window on one instance, and is never written anywhere.
 
 ## 3. Downloads: 5 successful per submission
 
@@ -111,16 +129,24 @@ render PDF -> append one ledger row -> read the key column up to that row
            -> ordinal 1..5: deliver the PDF      ordinal 6+: withhold it (429)
 ```
 
-Appends are atomic, so concurrent requests, **even on different serverless instances**, get different
-ordinals and exactly 5 are delivered. Inside one instance a per-submission queue runs same-grant
-requests one at a time, and once an instance has seen a submission exhausted it refuses further
-attempts from memory without calling Google. That memory only saves work; the ledger is the
-enforcement, so cold starts and other instances apply the same limit.
+Each request appends its own row (`INSERT_ROWS`) and judges itself by the rows before it, so
+concurrent requests, **even on different serverless instances**, get different ordinals and 5 are
+delivered. As with submissions this depends on Google giving each append its own row in arrival order
+(not a formal atomic guarantee); the code reads back the row it wrote and refuses the download if the
+key is not there.
+
+Inside one instance a per-submission queue runs same-grant requests one at a time. When the 5th PDF is
+delivered the instance remembers the submission as spent, so the 6th and later attempts are refused
+from memory with **no render and no Google call**. That memory only saves work; the ledger is the
+enforcement, so cold starts and other instances apply the same limit (their first attempt costs one
+render plus one append and one read, then they remember too).
 
 **It fails closed.** If the ledger cannot be reached, or a write cannot be confirmed, the download is
-refused with `503` ("No pudimos verificar tu descarga...") rather than served without a limit. That
-attempt does not use a download, and the same grant works again once Google responds. If Google
-credentials are missing the route returns `503` too.
+refused with `503` ("No pudimos verificar tu descarga...") rather than served without a limit. If
+the append never reached Google, no download is used and the same grant works again once Google
+responds. If Google applied the append but the app did not hear back (a timeout), the row exists, so
+**that failed attempt may use up one of the 5 downloads**: the limit errs on the strict side, never the
+loose one. If Google credentials are missing the route returns `503` too.
 
 ## 4. Per-IP limit: Vercel Firewall (to be set up)
 
@@ -139,15 +165,16 @@ Code: `src/lib/security-log.ts`. One JSON line per event in the Vercel runtime l
 {"app":"bp-questionnaire","event":"download_served","grant":"3f9a1c2b","ordinal":2,"limit":5}
 ```
 
-| Event                        | Level | Meaning                                                                              |
-| ---------------------------- | ----- | ------------------------------------------------------------------------------------ |
-| `submission_rate_limited`    | warn  | 6th or later submission for an email in 24 h (`retryAfterSeconds`)                   |
-| `submission_duplicate`       | info  | `outcome`: `served_cached_report`, `served_template_report` or `refused_window_over` |
-| `download_served`            | info  | a PDF was delivered (`ordinal` 1 to 5)                                               |
-| `download_limit_reached`     | warn  | the 6th or later download of a submission was refused                                |
-| `download_limit_unavailable` | warn  | the ledger could not be reached (download refused, `503`)                            |
-| `download_expired`           | warn  | a genuine grant used after its 5 minutes (`410`)                                     |
-| `download_unauthorized`      | warn  | missing, invalid or mismatched grant (`reason`)                                      |
+| Event                        | Level | Meaning                                                                                  |
+| ---------------------------- | ----- | ---------------------------------------------------------------------------------------- |
+| `submission_rate_limited`    | warn  | 6th or later submission for an email in 24 h (`retryAfterSeconds`)                       |
+| `submission_duplicate`       | info  | `outcome`: `served_cached_report`, `refused_report_unavailable` or `refused_window_over` |
+| `download_served`            | info  | a PDF was delivered (`ordinal` 1 to 5)                                                   |
+| `download_limit_reached`     | warn  | the 6th or later download of a submission was refused                                    |
+| `download_limit_unavailable` | warn  | the ledger could not be reached (download refused, `503`; `reason` as above)             |
+| `download_expired`           | warn  | a genuine grant used after its 5 minutes (`410`)                                         |
+| `download_unauthorized`      | warn  | missing, invalid or mismatched grant (`reason`)                                          |
+| `sheets_unavailable`         | warn  | Google failed while saving a submission (`reason`: `quota`, `timeout`, `other`)          |
 
 **What is never logged:** questionnaire answers, email addresses, names, IP addresses, download tokens,
 the report or its ids. Only allow-listed fields are written, and any value that is not a short machine
@@ -162,6 +189,36 @@ Two opaque tags let you correlate events without personal data:
 
 IP addresses are not in these logs; they are in Vercel's own request logs and the Firewall dashboard.
 The app does no alerting by itself: set up Vercel Log Drains or Alerts if you want to be notified.
+
+## Concurrency and failure review
+
+The append-then-rank design was reviewed for race conditions, ambiguous writes, failed requests and
+quota behavior. Outcomes of that review, including the problems it found:
+
+| Failure mode                                                       | What happens                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Many requests pass the pre-check at once                           | Ranked by row order after the append; 5 win. Verified with in-memory fakes and randomized fault injection; **to be confirmed on real Google** ([live testing](./live-testing.md))                                                                                                                   |
+| **Ambiguous append** (Google applied it, the caller saw a timeout) | The row exists. A retry with the same id finds it by its unique marker, so **no second row**. The retry gets the duplicate `409` (see section 2), not a second report                                                                                                                               |
+| Append applied but the read-back fails                             | Same as above: one row, request fails, retry is a duplicate                                                                                                                                                                                                                                         |
+| Rank read fails after the append                                   | Request fails (`502`); the row stays and still counts. A retry is judged by its position, never served as a harmless duplicate                                                                                                                                                                      |
+| Label write (`Rechazado por límite`) fails                         | Ignored on purpose: the `429` is what matters. Rejection never depends on the label                                                                                                                                                                                                                 |
+| A loser's answers are sent again with a new id                     | **Found and fixed in this review:** the loser's row used to match the duplicate check. It is now skipped, so the attempt is judged by the limit (`429`)                                                                                                                                             |
+| Google quota (`429`) while saving a submission                     | **Found and fixed:** used to be an opaque `502`. Now a `503` with `Retry-After: 60`, a friendly message and a `sheets_unavailable` log with `reason: quota`                                                                                                                                         |
+| Google quota or outage while counting a download                   | `503`, fails closed, reason logged; the grant works again when Google recovers                                                                                                                                                                                                                      |
+| Budget spent but the app keeps asking Google                       | **Found and fixed:** after the 5th delivery the 6th attempt cost a render and 2 Google calls; it now costs none (remembered in memory)                                                                                                                                                              |
+| Two writers get the same row (an overwrite)                        | Cannot be ruled out from Google's documentation. The submission path detects it (marker and answers are read back and must match). Two **downloads of the same grant** overwriting one row would be seen as one, so at most one extra PDF could be delivered. Not observed in testing, not provable |
+| Rows sorted, inserted or deleted in the response tab               | The email limit judges by row order: do not sort or insert rows. Deleting a row frees a slot                                                                                                                                                                                                        |
+| Instance clocks differ by seconds                                  | Harmless: the window is 24 hours and each request judges against its own clock                                                                                                                                                                                                                      |
+
+**Quota, measured.** Counting the Sheets calls the code makes (same count with the fake and the real
+client, because the fake sits behind the same interface): an accepted submission costs about **10
+reads and 2 writes** (including the status update after the response), a refused 6th submission about
+5 reads, a delivered download 1 read + 1 write, and a download refused from memory 0. Google's default
+quota is on the order of 60 read requests per minute per user per project (confirm in your Cloud
+console), so the app sustains roughly **6 accepted submissions per minute** before Google answers `429`
+(which the app now reports as `503`). Reducing this (for example caching the header row for a few
+seconds) is possible but changes read-after-write assumptions, so it was not done. If you expect bursts
+above that rate, ask for a higher Sheets quota or put a queue in front.
 
 ## What to do when...
 
@@ -181,6 +238,15 @@ The app does no alerting by itself: set up Vercel Log Drains or Alerts if you wa
 - They can take the survey again. Repeating the **same** answers within the first 5 minutes just gives
   the same report back (same deadline); between minute 5 and minute 10 they get a `409`; after 10
   minutes it is a new submission (and uses one of the 5 daily slots).
+
+### A user says "it says you already received my diagnosis and can't show it again" (`409`)
+
+- This is the duplicate rule (section 2): their first submission was already processed and this server
+  holds no copy of the report. Nothing is wrong with the Sheet: their row is there.
+- If they still have the original page open, they can keep downloading (up to 5 times, until the
+  5-minute window ends). If they closed it, or the first attempt failed after saving, they can submit
+  again after the time the message gives (the 10-minute duplicate window); that is a new submission.
+- Check the logs for `submission_duplicate` with `outcome` `refused_report_unavailable`.
 
 ### Downloads fail with "No pudimos verificar tu descarga" (`503`)
 
@@ -281,14 +347,23 @@ None of these is hidden by the code.
   typed by hand) are ignored by the window.
 - **Race losers keep a labelled row** and it keeps counting toward the window. That can only make the
   limit slightly stricter, never looser.
-- **Sheets API cost and quota.** A submission makes roughly 10 Sheets calls (the limit adds one read).
-  Google's per-user quota is on the order of 60 reads per minute (check your Cloud console), so a flood
-  can exhaust it and make submissions fail with `502`. Only the Firewall rule keeps floods away from it.
+- **Sheets API cost and quota.** About 10 reads and 2 writes per accepted submission (measured, see the
+  review above) against Google's per-user quota of roughly 60 reads per minute, so around 6 submissions
+  per minute sustained; beyond that, saving fails with `503`. Only the Firewall rule keeps floods away
+  from it, and Production shares this quota with anything else using the same service account.
+- **Not an atomic lock.** Both limits rely on Google giving each `INSERT_ROWS` append its own row in
+  arrival order. That is documented behavior but not a formal guarantee under heavy concurrency, so the
+  limits are very strong in practice and verified by read-back, not mathematically guaranteed.
 - **Render before count.** A burst of N parallel download requests can render up to N PDFs before the
   extra ones are withheld (they are never delivered). The per-submission queue and the in-memory
   "exhausted" memo keep this small.
 - **A PDF that is delivered but never saved by the browser still counts** as one of the 5.
-- **A duplicate served by a different instance has template text**, not AI text, by design (section 2).
+- **An uncached duplicate is refused, not re-served.** The server cannot reproduce the original report
+  without storing it, so on another instance (or after a cold start) a repeat gets a `409` instead of a
+  report. This also affects a user whose first attempt failed after the row was saved: they must wait
+  for the 10-minute duplicate window and resubmit. This is the price of never showing different
+  feedback; the alternative (storing reports) is explicitly out of scope.
+- **A failed or ambiguous download attempt may use a download** (see section 3): the limit errs strict.
 - **The cached report** (answers-derived content and first name) stays in one instance's memory for at
   most the 5-minute window. It is never persisted.
 - **Time zone.** Timestamps use the spreadsheet's time zone, so around a daylight-saving change the
@@ -296,11 +371,14 @@ None of these is hidden by the code.
 
 ## Where the tests are
 
-| File                                    | Covers                                                                                                |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `tests/rate-limit-submissions.test.mjs` | the 5-per-24h limit, rolling window, duplicates, concurrency, retry of a refused request, log content |
-| `tests/download-limit.test.mjs`         | 5 downloads, expiry, unauthorized requests, concurrency across instances, fail-closed, ledger privacy |
-| `tests/duplicate-handling.test.mjs`     | no AI call, no extended window, shared budget, `409` after the window                                 |
-| `tests/security-log.test.mjs`           | allow-listing and redaction of log fields                                                             |
+| File                                    | Covers                                                                                                                             |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/rate-limit-submissions.test.mjs` | the 5-per-24h limit, rolling window, duplicates, concurrency, retry of a refused request, log content                              |
+| `tests/download-limit.test.mjs`         | 5 downloads, expiry, unauthorized requests, concurrency across instances, fail-closed, ledger privacy                              |
+| `tests/duplicate-handling.test.mjs`     | identical report and grant for a cached duplicate, `409` when uncached or late, never a new AI call                                |
+| `tests/security-log.test.mjs`           | allow-listing and redaction of log fields                                                                                          |
+| `tests/sheets-failures.test.mjs`        | Google failure modes: quota, ambiguous writes, race losers, randomized fault injection (<=5 served, no duplicate rows)             |
+| `tests/live-scenarios.test.mjs`         | the 6th submission, the 6th download, duplicates, concurrency, ledger tab and privacy, against in-memory fakes                     |
+| `tests/live/live.test.mjs`              | the same scenarios against a REAL isolated Google spreadsheet (opt-in, `npm run test:live`, see [live testing](./live-testing.md)) |
 
 See also `docs/pdf-download.md` for the download flow and the grant format.

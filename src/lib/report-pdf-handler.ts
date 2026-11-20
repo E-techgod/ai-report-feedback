@@ -94,7 +94,7 @@ export async function handlePdfDownload(
     );
   }
   if (outcome.kind === 'unavailable') {
-    logSecurityEvent('download_limit_unavailable', { grant });
+    logSecurityEvent('download_limit_unavailable', { grant, reason: outcome.reason });
     return fail(503, 'No pudimos verificar tu descarga en este momento. Intenta nuevamente.');
   }
   logSecurityEvent('download_served', {

@@ -45,7 +45,7 @@ async function logged(fn) {
   }
 }
 
-test('each grant downloads at most five times; the sixth is a 429 and the instance then stops touching Sheets', async () => {
+test('each grant downloads at most five times; once spent, further attempts cost no render and no Google call', async () => {
   const r = rig();
   const { result: statuses, events } = await logged(async () => {
     const out = [];
@@ -54,9 +54,11 @@ test('each grant downloads at most five times; the sixth is a 429 and the instan
   });
   assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429, 429]);
   assert.equal(MAX_DOWNLOADS_PER_SUBMISSION, 5);
-  // The 7th was refused from memory: no render and no ledger traffic beyond the 6th attempt.
-  assert.equal(r.gateway.calls.append, 6);
-  assert.equal(r.rendered.length, 6);
+  // The instance learned the budget was spent when it delivered the 5th: the 6th and 7th were
+  // refused from memory, with no render, no ledger append and no ledger read.
+  assert.equal(r.gateway.calls.append, 5);
+  assert.equal(r.gateway.calls.read, 5);
+  assert.equal(r.rendered.length, 5);
   assert.equal(events.filter((e) => e.event === 'download_served').length, 5);
   assert.equal(events.filter((e) => e.event === 'download_limit_reached').length, 2);
 });

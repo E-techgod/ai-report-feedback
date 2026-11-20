@@ -1,3 +1,5 @@
+import { classifySheetsError, type SheetsFailure } from './sheets-errors';
+
 /**
  * Server-side limit of successful PDF downloads per submission, with no database and no stored PDF.
  *
@@ -51,7 +53,9 @@ export function createSheetLedger(gateway: LedgerGateway): DownloadLedger {
 }
 
 export type DeliverOutcome<T> =
-  { kind: 'ok'; value: T; ordinal: number } | { kind: 'limit' } | { kind: 'unavailable' };
+  | { kind: 'ok'; value: T; ordinal: number }
+  | { kind: 'limit' }
+  | { kind: 'unavailable'; reason: SheetsFailure };
 
 export type DownloadLimiter = {
   /**
@@ -99,13 +103,13 @@ export function createDownloadLimiter(
         let ordinal: number;
         try {
           ordinal = await ledger.record(key, now);
-        } catch {
-          return { kind: 'unavailable' } as const;
+        } catch (error) {
+          return { kind: 'unavailable', reason: classifySheetsError(error) } as const;
         }
-        if (ordinal > limit) {
-          exhausted.set(key, expiresAtMs);
-          return { kind: 'limit' } as const;
-        }
+        // Once `limit` rows carry this key the budget is spent for everyone, so every later attempt
+        // on this instance is refused from memory: no render and no Google call.
+        if (ordinal >= limit) exhausted.set(key, expiresAtMs);
+        if (ordinal > limit) return { kind: 'limit' } as const;
         return { kind: 'ok', value, ordinal } as const;
       });
     },

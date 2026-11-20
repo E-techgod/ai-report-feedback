@@ -169,6 +169,13 @@ function findRecentDuplicate(
     const row = history.rows[i];
     const timestamp = row[schema.timestamp];
     if (typeof timestamp !== 'number') continue;
+    // A row that lost a race for the last slot is not a submission anyone was served: it must not
+    // absorb a new attempt as a "duplicate" (that attempt is judged by the limit instead).
+    if (
+      schema.tracking.reportStatus !== undefined &&
+      String(row[schema.tracking.reportStatus] ?? '') === REJECTED_BY_LIMIT_LABEL
+    )
+      continue;
     const ageMinutes = (nowSerial - timestamp) * 1440;
     if (ageMinutes < -1 || ageMinutes > DUPLICATE_WINDOW_MINUTES) continue;
     if (
