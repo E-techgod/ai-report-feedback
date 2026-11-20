@@ -646,6 +646,59 @@ export async function markReportGenerated(
   return true;
 }
 
+export const PDF_DOWNLOADED_LABEL = 'Descargado';
+
+/**
+ * After a PDF was actually delivered, records it in the submission's own row: `Estado Descarga PDF`
+ * = "Descargado" and `Fecha Descarga PDF` = when (sheet time zone, same format as `Marca temporal`).
+ * Only the FIRST delivered download is recorded; later ones (up to the per-submission limit) leave the
+ * row untouched, so the date stays "when the person first downloaded it". `Estado Descarga CSV` and
+ * `Fecha Descarga CSV` are never touched.
+ *
+ * The row is found by its unique `ID Reporte` marker (`submission:<uuid>`), re-read on every call
+ * because rows can move. Zero or several rows with the marker means nothing is written. Returns
+ * whether cells were written. Throws on Google/API failures (callers log and go on).
+ */
+export async function markPdfDownloaded(
+  gateway: SheetsGateway,
+  submissionId: string,
+  now: Date = new Date(),
+  timeoutMs?: number,
+): Promise<boolean> {
+  const { schema, markers } = await readIndex(gateway);
+  const { pdfStatus, pdfDownloadedAt } = schema.tracking;
+  if (pdfStatus === undefined || pdfDownloadedAt === undefined)
+    throw Object.assign(new Error('Required download tracking headers are missing'), {
+      code: 'missing_headers',
+    });
+  const marker = `submission:${submissionId}`;
+  const rows = markers.flatMap((value, index) =>
+    index > 0 && value === marker ? [index + 1] : [],
+  );
+  if (rows.length !== 1)
+    throw Object.assign(
+      new Error('Spreadsheet row for this submission was not found exactly once'),
+      {
+        code: rows.length === 0 ? 'row_not_found' : 'row_ambiguous',
+      },
+    );
+  const rowNumber = rows[0];
+  const row = firstRow(
+    (await readRanges(gateway, [rowRange(rowNumber, schema.headers.length)], timeoutMs))[0],
+  );
+  if (String(row[pdfStatus] ?? '') === PDF_DOWNLOADED_LABEL) return false;
+  const timeZone = await gateway.getTimeZone(timeoutMs).catch(() => FALLBACK_TIME_ZONE);
+  await gateway.writeCells(
+    rowNumber,
+    [
+      { index: pdfStatus, value: PDF_DOWNLOADED_LABEL },
+      { index: pdfDownloadedAt, value: wallClock(now, timeZone).text },
+    ],
+    timeoutMs,
+  );
+  return true;
+}
+
 /** Compatibility wrapper for callers that only need the dedupe outcome. */
 export async function saveSubmission(
   gateway: SheetsGateway,

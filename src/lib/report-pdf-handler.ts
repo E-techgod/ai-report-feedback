@@ -3,6 +3,7 @@ import { downloadLedgerKey, grantExpiresAt, verifyDownloadGrant } from './downlo
 import { MAX_DOWNLOADS_PER_SUBMISSION, type DownloadLimiter } from './download-ledger';
 import { finalReportSchema, deepFreeze, type FinalReport } from './final-report';
 import { errorFacts, logSecurityEvent } from './security-log';
+import { classifySheetsError } from './sheets-errors';
 import { NO_STORE } from './services';
 
 // A finalized report is ~10-15 KB of JSON; anything near this is not one.
@@ -39,11 +40,17 @@ export async function handlePdfDownload(
     renderPdf,
     limiter,
     now,
+    trackDownload,
+    schedule,
   }: {
     secret: string;
     renderPdf: (report: FinalReport) => Promise<Buffer>;
     limiter: DownloadLimiter;
     now?: () => Date;
+    /** Records a delivered download in the response row (best effort, runs after the response). */
+    trackDownload?: (report: FinalReport, at: Date) => Promise<unknown>;
+    /** Runs a task after the response (Next's `after`), so a slow Sheet never delays the download. */
+    schedule?: (task: () => Promise<void>) => void;
   },
 ) {
   const raw = await req.text();
@@ -107,6 +114,29 @@ export async function handlePdfDownload(
     ordinal: outcome.ordinal,
     limit: MAX_DOWNLOADS_PER_SUBMISSION,
   });
+  if (trackDownload && schedule) {
+    // Best effort: a failure here never affects the customer's download.
+    try {
+      schedule(async () => {
+        try {
+          await trackDownload(report, clock);
+        } catch (error) {
+          logSecurityEvent('status_update_failed', {
+            grant,
+            reason: classifySheetsError(error),
+            outcome: 'pdf_download',
+            ...errorFacts(error),
+          });
+        }
+      });
+    } catch {
+      logSecurityEvent('status_update_failed', {
+        grant,
+        reason: 'schedule_failed',
+        outcome: 'pdf_download',
+      });
+    }
+  }
   const pdf = outcome.value;
   return new NextResponse(new Uint8Array(pdf), {
     status: 200,

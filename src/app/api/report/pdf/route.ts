@@ -1,8 +1,9 @@
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { createDownloadLimiter, createSheetLedger } from '@/lib/download-ledger';
-import { createGoogleLedgerGateway } from '@/lib/google-sheets-client';
+import { createGoogleLedgerGateway, createGoogleSheetsGateway } from '@/lib/google-sheets-client';
 import { handlePdfDownload } from '@/lib/report-pdf-handler';
 import { renderReportPdf } from '@/lib/pdf/ReportPdf';
+import { markPdfDownloaded } from '@/lib/sheets';
 import { NO_STORE, reportTokenSecret } from '@/lib/services';
 
 export const runtime = 'nodejs';
@@ -21,6 +22,9 @@ function getLimiter() {
   return limiter;
 }
 
+// One Google client per function instance, used only to record the download in the response row.
+let sheetsGateway: ReturnType<typeof createGoogleSheetsGateway>;
+
 /**
  * POST: the report + `x-download-token` issued at submission. Renders the PDF; stores no PDF.
  * Each submission may download its report at most 5 times (counted in the Sheet, see
@@ -31,5 +35,16 @@ export async function POST(req: Request) {
   const secret = reportTokenSecret();
   const activeLimiter = getLimiter();
   if (!secret || !activeLimiter) return new NextResponse(null, { status: 503, headers: NO_STORE });
-  return handlePdfDownload(req, { secret, renderPdf: renderReportPdf, limiter: activeLimiter });
+  sheetsGateway ??= createGoogleSheetsGateway();
+  const gateway = sheetsGateway;
+  return handlePdfDownload(req, {
+    secret,
+    renderPdf: renderReportPdf,
+    limiter: activeLimiter,
+    // Marks `Estado Descarga PDF` / `Fecha Descarga PDF` in the submission's row, after the response.
+    trackDownload: gateway
+      ? (report, at) => markPdfDownloaded(gateway, report.submissionId, at, 8_000)
+      : undefined,
+    schedule: after,
+  });
 }
