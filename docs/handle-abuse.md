@@ -85,20 +85,35 @@ ever hand back is a short-lived in-memory one on the instance that generated it.
 | Duplicate after the 5-minute window                              | **`409`** `duplicate_window_over`: nothing can be retrieved or regenerated afterwards          |
 | Same answers after the 10-minute duplicate window                | A **new submission** (counts toward the 5 per day, calls the AI once)                          |
 
-The `409` for an uncached duplicate says, in Spanish: _"Ya recibimos este diagnóstico, pero no podemos
-volver a mostrarte el mismo informe desde aquí. Si todavía tienes abierta la página con tu informe,
-puedes seguir descargándolo hasta que termine su ventana de 5 minutos. Podrás generar un informe nuevo
-en N minutos."_ The original page keeps working: its grant, its 5-minute deadline and its 5-download
-budget are untouched.
+The `409` says, in Spanish: _"Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde
+aquí. Podrás generar un informe nuevo en N minutos."_ It deliberately **does not assume the person
+already holds a report**: the first attempt may have failed before one was made. If they do still have
+the original page open, its grant, its 5-minute deadline and its 5-download budget are untouched.
 
 Consequences to be aware of (a deliberate choice, see [Limitations](#limitations-read-this)):
 
-- A person whose **first** attempt failed after the row was saved (Google timeout, a function killed
-  mid-generation) and who retries will also get this `409`: the server cannot prove, without storing
-  anything, that no report was ever shown, so it will not generate a second one. They can resubmit
-  after the 10-minute duplicate window.
+- A person whose **first** attempt failed after the row was saved and who retries will also get this
+  `409`: the server cannot prove, without storing anything, that no report was ever shown, so it will
+  not generate a second one. They can resubmit after the 10-minute duplicate window. When the failure
+  is one the server knows about, it says so up front (next section) instead of letting them find out
+  through the `409`.
 - The in-memory copy holds the report (answers-derived content and first name) for at most the
   5-minute window on one instance, and is never written anywhere.
+
+### Saved, but the report could not be completed (`503` `saved_unconfirmed`)
+
+When Google **confirmed the append** (the row exists and counts toward the person's 5 per day) but
+reading it back or verifying it failed, or the report could not be generated, the answer is:
+
+- HTTP `503`, body `{"ok":false,"saved":true,"code":"saved_unconfirmed","error":"Recibimos tus
+respuestas, pero no pudimos completar tu reporte. Por favor, vuelve a intentarlo en aproximadamente
+10 minutos."}`, and `Retry-After` = what is left of the 10-minute duplicate window (600 at most).
+- Retrying before then is a duplicate (the `409` above); after it, the same answers are a new
+  submission with a new report.
+- If the **append call itself** fails or times out, the write is _uncertain_ and nothing is claimed:
+  `503 service_busy` for a Google quota error ("Estamos recibiendo muchas solicitudes...") or `502`
+  ("No pudimos confirmar el envío de tu diagnóstico..."). The row may or may not exist.
+- Logged as `sheets_unavailable` with `outcome: saved_unconfirmed` and the `reason` only.
 
 ## 3. Downloads: 5 successful per submission
 
@@ -207,8 +222,8 @@ quota behavior. Outcomes of that review, including the problems it found:
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Many requests pass the pre-check at once                           | Ranked by row order after the append; 5 win. Verified with in-memory fakes and randomized fault injection; **to be confirmed on real Google** ([live testing](./live-testing.md))                                                                                                                   |
 | **Ambiguous append** (Google applied it, the caller saw a timeout) | The row exists. A retry with the same id finds it by its unique marker, so **no second row**. The retry gets the duplicate `409` (see section 2), not a second report                                                                                                                               |
-| Append applied but the read-back fails                             | Same as above: one row, request fails, retry is a duplicate                                                                                                                                                                                                                                         |
-| Rank read fails after the append                                   | Request fails (`502`); the row stays and still counts. A retry is judged by its position, never served as a harmless duplicate                                                                                                                                                                      |
+| Append applied but the read-back fails                             | `503` `saved_unconfirmed` ("Recibimos tus respuestas, pero no pudimos completar tu reporte...") with `Retry-After` = rest of the duplicate window. One row; a retry before then is a `409`                                                                                                          |
+| Rank read fails after the append                                   | Same `503` `saved_unconfirmed`; the row stays and still counts toward the limit                                                                                                                                                                                                                     |
 | Label write (`Rechazado por límite`) fails                         | Ignored on purpose: the `429` is what matters. Rejection never depends on the label                                                                                                                                                                                                                 |
 | A loser's answers are sent again with a new id                     | **Found and fixed in this review:** the loser's row used to match the duplicate check. It is now skipped, so the attempt is judged by the limit (`429`)                                                                                                                                             |
 | Google quota (`429`) while saving a submission                     | **Found and fixed:** used to be an opaque `502`. Now a `503` with `Retry-After: 60`, a friendly message and a `sheets_unavailable` log with `reason: quota`                                                                                                                                         |
@@ -252,8 +267,8 @@ That page also lists what remains unverified.
 
 - This is the duplicate rule (section 2): their first submission was already processed and this server
   holds no copy of the report. Nothing is wrong with the Sheet: their row is there.
-- If they still have the original page open, they can keep downloading (up to 5 times, until the
-  5-minute window ends). If they closed it, or the first attempt failed after saving, they can submit
+- The message does not say whether they received a report. If they still have the original page open
+  they can keep downloading (up to 5 times, until the 5-minute window ends); otherwise they can submit
   again after the time the message gives (the 10-minute duplicate window); that is a new submission.
 - Check the logs for `submission_duplicate` with `outcome` `refused_report_unavailable`.
 
@@ -296,8 +311,8 @@ resets the count for that person. If you prefer to create the tab yourself, name
 
 Some user-facing text repeats these numbers literally and **must be edited by hand** when you change
 them: `DOWNLOAD_COPY` in `src/components/ReportView.tsx` ("hasta 5 veces durante 5 minutos", "límite de
-5 descargas") and the `409` message in `src/lib/questionnaire-handler.ts` ("ventana de descarga de 5
-minutos"). The `429` messages for submissions and for the PDF use the constants. Then run the tests;
+5 descargas") and the messages in `src/lib/questionnaire-handler.ts` ("aproximadamente 10 minutos" in the
+`saved_unconfirmed` text, which mirrors the duplicate window). The `429` messages for submissions and for the PDF use the constants. Then run the tests;
 several of them assert the limits.
 
 ## Do this before launch

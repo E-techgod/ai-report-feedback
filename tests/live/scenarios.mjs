@@ -350,8 +350,72 @@ export function defineScenarios(test, getBackend) {
       const again = await send(ctx, { ...input, id: crypto.randomUUID() });
       assert.equal(again.status, 200);
       assert.equal((await rowsFor(email)).length, 2);
+      assert.doesNotMatch(
+        retryBody.error,
+        /todavía tienes|puedes seguir|ventana de descarga/i,
+        'the 409 never assumes the person already holds a report',
+      );
       t.diagnostic(`first: ${first.status} "${firstBody.error}"`);
       t.diagnostic(`retry: ${retry.status} "${retryBody.error}"`);
+    },
+  );
+
+  test(
+    'SCENARIO 8: saved but not confirmed: a real append, then the read-back fails (injected fault): 503 saved_unconfirmed, one row, clean 409 retry',
+    opts,
+    async (t) => {
+      const { h, ctx } = context();
+      const real = ctx.gateway;
+      let armed = false;
+      let injected = false;
+      ctx.gateway = new Proxy(real, {
+        get(target, prop) {
+          if (prop === 'appendRow')
+            return async (row) => {
+              const result = await target.appendRow(row); // really appended
+              armed = true;
+              return result;
+            };
+          if (prop === 'batchRead')
+            return async (ranges, timeoutMs) => {
+              if (armed && !injected) {
+                injected = true;
+                const error = new Error('socket hang up (injected after a real append)');
+                error.code = 'ECONNRESET';
+                throw error;
+              }
+              return target.batchRead(ranges, timeoutMs);
+            };
+          return Reflect.get(target, prop, target)?.bind?.(target);
+        },
+      });
+      const email = uniqueEmail();
+      const input = submission({ email });
+      const first = await send(ctx, input);
+      const body = await first.json();
+      assert.equal(first.status, 503);
+      assert.equal(body.code, 'saved_unconfirmed');
+      assert.equal(
+        body.error,
+        'Recibimos tus respuestas, pero no pudimos completar tu reporte. Por favor, vuelve a intentarlo en aproximadamente 10 minutos.',
+      );
+      const retryAfter = Number(first.headers.get('retry-after'));
+      assert.ok(retryAfter > 0 && retryAfter <= 600, `Retry-After ${retryAfter}`);
+      assert.equal((await rowsFor(email)).length, 1, 'the row exists in the real sheet');
+      assert.equal(h.narrativeCalls.length, 0);
+
+      h.clock.t += 60_000;
+      const retry = await send(ctx, input);
+      const retryBody = await retry.json();
+      assert.equal(retry.status, 409);
+      assert.doesNotMatch(retryBody.error, /todavía tienes|puedes seguir|ventana de descarga/i);
+      assert.equal((await rowsFor(email)).length, 1, 'the retry added no row');
+
+      h.clock.t += 10 * MIN;
+      assert.equal((await send(ctx, { ...input, id: crypto.randomUUID() })).status, 200);
+      assert.equal((await rowsFor(email)).length, 2);
+      t.diagnostic(`503 Retry-After ${retryAfter}s: "${body.error}"`);
+      t.diagnostic(`409: "${retryBody.error}"`);
     },
   );
 }

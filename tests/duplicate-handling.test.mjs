@@ -9,6 +9,10 @@ import { freshLimiter } from './helpers/ledger.mjs';
 import { SECRET, post, questionnaireContext } from './helpers/sheet-gateway.mjs';
 
 const send = (ctx, input) => handleQuestionnaire(post(input), ctx);
+// The 409 must never imply the person already holds a report: the first attempt may have failed
+// before any report was made.
+const ASSUMES_A_REPORT_WAS_SEEN =
+  /todavía tienes|sigue(s)? descargando|puedes seguir|ventana de descarga|tu informe abierto/i;
 const MIN = 60_000;
 
 async function quiet(fn) {
@@ -55,8 +59,11 @@ test('a duplicate this instance cannot reproduce is refused with a clear error: 
   assert.equal(body.duplicate, true);
   assert.equal(body.code, 'duplicate_report_unavailable');
   assert.ok(!('report' in body) && !('download' in body), 'no report and no new grant');
-  assert.match(body.error, /no podemos volver a mostrarte el mismo informe/);
-  assert.match(body.error, /sigue|seguir descargándolo hasta que termine su ventana de 5 minutos/);
+  assert.match(
+    body.error,
+    /Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde aquí/,
+  );
+  assert.doesNotMatch(body.error, ASSUMES_A_REPORT_WAS_SEEN);
   assert.match(body.error, /Podrás generar un informe nuevo en 9 minutos/);
   assert.equal(h.narrativeCalls.length, 1, 'the AI was only called for the original');
   assert.equal(sheet.appends, 1);
@@ -92,7 +99,7 @@ test('a duplicate after the five minutes is refused (409): nothing is regenerate
   assert.equal(body.ok, false);
   assert.equal(body.duplicate, true);
   assert.ok(!('report' in body) && !('download' in body));
-  assert.match(body.error, /ventana de descarga de 5 minutos terminó/);
+  assert.doesNotMatch(body.error, ASSUMES_A_REPORT_WAS_SEEN);
   assert.match(body.error, /en 4 minutos/, 'tells when a new report can be requested');
   assert.equal(h.narrativeCalls.length, 1, 'no AI call');
   assert.equal(events()[0].outcome, 'refused_window_over');

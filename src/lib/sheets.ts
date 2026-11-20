@@ -375,6 +375,21 @@ function storedSubmissionId(row: SheetCell[] | undefined, schema: SheetSchema, f
   return match ? match[1] : fallback;
 }
 
+/**
+ * Thrown when Google confirmed the append (the row exists, and it counts toward the person's limit)
+ * but reading it back, verifying it or ranking it failed. Not thrown when the append call itself
+ * fails: then the write is uncertain and nothing may be claimed about it.
+ */
+export class SavedUnconfirmedError extends Error {
+  constructor(
+    readonly reason: unknown,
+    /** When the row was written (epoch ms): the duplicate window runs from here. */
+    readonly savedAtMs: number,
+  ) {
+    super('Submission saved but not confirmed');
+  }
+}
+
 const inflight = new Map<string, Promise<SheetSaveResult>>();
 const recentIds = new Map<
   string,
@@ -468,62 +483,68 @@ async function writeOnce(
     };
 
   const appended = await gateway.appendRow(buildRow(submission, text, schema));
-  // ONE request reads back everything the checks below need: the marker column (is the row there,
-  // exactly once?), the email column (rank among this email's rows) and, when Google reported which
-  // row it appended, that row (are the stored email and answers ours?). Google's updatedCells only
-  // counts cells, not a promise that every placeholder was stored, so the unique marker and the
-  // meaningful fields are read back instead.
-  const hint = appendedRowNumber(appended.updatedRange);
-  const [afterMarkers, afterEmails, hinted] = await readRanges(gateway, [
-    column(schema.tracking.reportId as number),
-    column(schema.email),
-    ...(hint ? [rowRange(hint, schema.headers.length)] : []),
-  ]);
-  const matches = columnValues(afterMarkers).flatMap((value, index) =>
-    index > 0 && value === marker ? [index + 1] : [],
-  );
-  if (matches.length !== 1) throw new Error('Google Sheets did not confirm the write');
-  const rowNumber = matches[0];
-  const row =
-    hinted && hint === rowNumber
-      ? firstRow(hinted)
-      : firstRow((await readRanges(gateway, [rowRange(rowNumber, schema.headers.length)]))[0]);
-  if (
-    !row.length ||
-    normalizeEmail(String(row[schema.email] ?? '')) !== normalizeEmail(submission.email) ||
-    questionIds.some(
-      (id) =>
-        foldAnswer(row[schema.questions[id]]) !==
-        foldAnswer(normalizeAnswer(submission.answers[id])),
+  // From here on Google has CONFIRMED the append: the row exists. Any failure below is "saved but not
+  // confirmed" (the caller says so), unlike a failure of the append itself, which is uncertain.
+  try {
+    // ONE request reads back everything the checks below need: the marker column (is the row there,
+    // exactly once?), the email column (rank among this email's rows) and, when Google reported which
+    // row it appended, that row (are the stored email and answers ours?). Google's updatedCells only
+    // counts cells, not a promise that every placeholder was stored, so the unique marker and the
+    // meaningful fields are read back instead.
+    const hint = appendedRowNumber(appended.updatedRange);
+    const [afterMarkers, afterEmails, hinted] = await readRanges(gateway, [
+      column(schema.tracking.reportId as number),
+      column(schema.email),
+      ...(hint ? [rowRange(hint, schema.headers.length)] : []),
+    ]);
+    const matches = columnValues(afterMarkers).flatMap((value, index) =>
+      index > 0 && value === marker ? [index + 1] : [],
+    );
+    if (matches.length !== 1) throw new Error('Google Sheets did not confirm the write');
+    const rowNumber = matches[0];
+    const row =
+      hinted && hint === rowNumber
+        ? firstRow(hinted)
+        : firstRow((await readRanges(gateway, [rowRange(rowNumber, schema.headers.length)]))[0]);
+    if (
+      !row.length ||
+      normalizeEmail(String(row[schema.email] ?? '')) !== normalizeEmail(submission.email) ||
+      questionIds.some(
+        (id) =>
+          foldAnswer(row[schema.questions[id]]) !==
+          foldAnswer(normalizeAnswer(submission.answers[id])),
+      )
     )
-  )
-    throw new Error('Google Sheets did not confirm the write');
+      throw new Error('Google Sheets did not confirm the write');
 
-  // Concurrency: requests for the same email that raced past the pre-check are ranked by row order.
-  const lostRace = await rankOverLimit(
-    gateway,
-    schema,
-    columnValues(afterEmails),
-    submission.email,
-    rowNumber,
-    serial,
-  );
-  if (lostRace !== null) {
-    // Keep the row (the lead is not lost) but label it so it is not mistaken for a pending report.
-    await gateway
-      .writeCells(rowNumber, [
-        { index: schema.tracking.reportStatus as number, value: REJECTED_BY_LIMIT_LABEL },
-      ])
-      .catch(() => undefined);
-    return {
-      status: 'limited',
+    // Concurrency: requests for the same email that raced past the pre-check are ranked by row order.
+    const lostRace = await rankOverLimit(
+      gateway,
+      schema,
+      columnValues(afterEmails),
+      submission.email,
       rowNumber,
-      submissionId: submission.id,
-      submittedAtMs: nowMs,
-      retryAfterSeconds: lostRace,
-    };
+      serial,
+    );
+    if (lostRace !== null) {
+      // Keep the row (the lead is not lost) but label it so it is not mistaken for a pending report.
+      await gateway
+        .writeCells(rowNumber, [
+          { index: schema.tracking.reportStatus as number, value: REJECTED_BY_LIMIT_LABEL },
+        ])
+        .catch(() => undefined);
+      return {
+        status: 'limited',
+        rowNumber,
+        submissionId: submission.id,
+        submittedAtMs: nowMs,
+        retryAfterSeconds: lostRace,
+      };
+    }
+    return { status: 'created', rowNumber, submissionId: submission.id, submittedAtMs: nowMs };
+  } catch (error) {
+    throw new SavedUnconfirmedError(error, nowMs);
   }
-  return { status: 'created', rowNumber, submissionId: submission.id, submittedAtMs: nowMs };
 }
 
 /**

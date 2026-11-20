@@ -128,7 +128,9 @@ test('a write confirmed late (verification read fails) behaves the same: one row
   };
   const input = submission();
   const { result: failed } = await captured(() => send(ctx, input));
-  assert.equal(failed.status, 502);
+  // Google confirmed the append, only the read-back failed: saved but not confirmed.
+  assert.equal(failed.status, 503);
+  assert.equal((await failed.json()).code, 'saved_unconfirmed');
   const { result: retry } = await captured(() => send(ctx, input));
   assert.equal(retry.status, 409);
   assert.equal(sheet.rows.length, 2);

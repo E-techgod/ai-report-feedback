@@ -147,37 +147,33 @@ What the numbers do not say:
 | Smooth the burst (stagger the campaign email)            | Free and effective: send in batches (for example 10 per minute).                                                                                   |
 | Recover the ambiguous write                              | See section 7.                                                                                                                                     |
 
-## 7. The ambiguous write: saved, but the person saw an error
+## 7. The ambiguous write: saved, but the person saw an error (implemented)
 
-Case: Google applied the append, then the app saw a failure (a `429`, a timeout) before it could confirm
-the row. The person gets `503` ("try again in a few minutes"); the row exists and counts toward their 5;
-no report was generated or shown. Their retry finds the row, and because reports are not stored the app
-answers `409` ("we already received your diagnosis ... if you still have the page open you can keep
-downloading"). That last sentence is wrong for this case: there is no page with a report.
+Case: Google applied the append, then the app failed before it could confirm the row or finish the
+report. The row exists and counts toward the person's 5; no report was shown. Because reports are not
+stored, a retry cannot be answered with the report, only with a `409`.
 
-What can be known without storing anything: the failure happened **before** generation (generation
-starts only after the save is confirmed), so in this exact case no report was ever shown. What cannot be
-known on a later retry is that fact, because a row left `Pendiente` can also be a report that was shown
-and whose `Generado` update (after the response) failed. Regenerating from `Pendiente` alone could
-therefore show a second, different report for the same submission. That is the line not to cross.
+What can be known without storing anything: the failure happened **before** a report was shown, but a
+later retry cannot know that, because a row left `Pendiente` can also be a report that was shown whose
+`Generado` update (after the response) failed. Regenerating from `Pendiente` alone could show a second,
+different report for the same submission. That is the line not to cross, so the app never regenerates.
 
-Options, smallest first:
+What the app does now (smallest safe recovery, no new state, no extra Sheets requests):
 
-1. **Say the truth (recommended, tiny, no new state).** Mark the error at the point of failure: if the
-   append may have been applied and the app could not confirm it, answer `503` with a distinct code
-   (`saved_unconfirmed`), `Retry-After` = seconds left in the 10-minute duplicate window, and text such
-   as "Recibimos tus respuestas pero no pudimos confirmarlas. Vuelve a enviar el cuestionario en N
-   minutos y generaremos tu informe". The page keeps the answers, so resubmitting is one click. The
-   cost is one burnt slot of the person's 5 per day and a wait of up to 10 minutes. No extra Sheets
-   requests. About 15 lines in `src/lib/sheets.ts` and the handler, plus the message.
-2. **Fix the wrong `409` sentence for the case where it applies** (the "keep downloading" advice) by
-   using the same distinct code when the row is `Pendiente` and older than the 5-minute window.
-3. **Claim state (only if live numbers show this happens often):** write `Estado Reporte = Generando`
-   before generating and regenerate only for a row left in that state. This still cannot prove "never
-   shown" unless `Generado` is also written _before_ the response is sent, which adds latency and a hard
-   dependency on a second Sheets write. Not recommended without data.
+| Where it failed                                                   | Answer                                                                                                                                                                                                                                       |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| After Google confirmed the append (read-back, verification, rank) | `503` `saved_unconfirmed`, `Retry-After` = rest of the 10-minute duplicate window, the exact Spanish message "Recibimos tus respuestas, pero no pudimos completar tu reporte. Por favor, vuelve a intentarlo en aproximadamente 10 minutos." |
+| Report generation failed after the save                           | The same response                                                                                                                                                                                                                            |
+| The append call itself failed or timed out (write uncertain)      | `503 service_busy` (quota) or `502`; **no claim** that the answers were or were not saved                                                                                                                                                    |
+| Before the append                                                 | Same as above: nothing was written                                                                                                                                                                                                           |
+| A retry before the window ends                                    | `409` "Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde aquí. Podrás generar un informe nuevo en N minutos." It never assumes a report was received                                                                   |
+| After the window                                                  | A new submission with its own report (it uses one of the 5 daily slots, as the unconfirmed row did)                                                                                                                                          |
 
-Not an option: storing the report or the PDF anywhere, which the project rules out.
+The cost is one burnt slot of the person's 5 per day and a wait of up to 10 minutes.
+
+Not done: a claim state (`Estado Reporte = Generando`) or writing `Generado` before the response. Neither
+can prove "never shown" without adding latency and a hard dependency on a second Sheets write. Revisit
+only if live data shows this case is frequent. Storing the report or the PDF is out of scope.
 
 ## 8. Not verified
 

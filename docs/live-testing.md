@@ -36,7 +36,9 @@ It takes several minutes (the throttle). Scenarios: (1) the 6th submission, (2) 
 window, (3) 8 concurrent submissions, (4) duplicates (cached, uncached, window over), (5) the 6th
 download and the ledger tab, (6) 10 parallel downloads over 3 simulated instances, (7) an ambiguous write
 (a row Google really saved, reported to the app as a quota error; the retry must be a clean `409` with
-no second row). It prints the real number of Sheets requests and the time per request. Expected after
+no second row), (8) saved but not confirmed (a real append whose read-back fails: `503`
+`saved_unconfirmed` with the exact message, `Retry-After`, one row, clean `409`, new submission after
+10 minutes). It prints the real number of Sheets requests and the time per request. Expected after
 the quota optimization (`docs/sheets-quota.md`): 4 reads + 2 writes per accepted submission, 2 reads for a
 refused 6th, 1 read + 1 write per delivered download. If the live numbers are higher, the consolidation
 is not behaving as the fakes suggest.
@@ -65,10 +67,10 @@ with the service account, with `GROQ_API_KEY` set only if you want to see real A
    `Control de descargas` tab: 5 or 6 rows with the same opaque `dl_...` key, no names or emails.
 4. **Duplicates.** Submit the same answers twice within 5 minutes: you see the identical report. Then
    open a private window, submit the same email and answers: expect either the identical report or the
-   `409` message "Ya recibimos este diagnóstico, pero no podemos volver a mostrarte el mismo informe...".
+   `409` message "Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde aquí...".
    Never a different text.
 5. **Google down.** Revoke the service account's access to the `[TEST]` sheet and submit: the page
-   shows "No se pudo guardar tu diagnóstico" (`502`); a download shows "No pudimos verificar tu
+   shows "No pudimos confirmar el envío de tu diagnóstico" (`502`); a download shows "No pudimos verificar tu
    descarga" (`503`). Restore access and confirm the same grant works again.
 6. **Quota.** The `503` "Estamos recibiendo muchas solicitudes" is only reachable by really exhausting
    the quota; it is covered by tests with a simulated Google `429` and is **not** expected to be
@@ -110,3 +112,12 @@ Not exercised live: a real Google `429` (it would throttle the quota shared with
 real Vercel instances, the browser UI, and the real AI. Observed: the `409` text after an ambiguous
 write still says "if you still have your report page open you can keep downloading", which is wrong in
 that case (see `docs/sheets-quota.md` section 7).
+
+### Second live run (scenarios 4, 7 and 8, after the `saved_unconfirmed` change)
+
+Same isolated `[TEST]` spreadsheet, real Google. All three pass. Scenario 8 (a real append whose read-back
+is made to fail, an injected fault on real storage) returned `503` `saved_unconfirmed` with the exact
+message and `Retry-After: 600`, left exactly one real row, the retry was a `409` with the neutral text
+("Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde aquí. Podrás generar un informe
+nuevo en 9 minutos."), and the same answers after 10 minutes created a second row and a report. Scenarios
+4 and 7 confirmed the new `409` text. Injected faults are not real Google failures.

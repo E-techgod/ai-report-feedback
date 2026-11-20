@@ -6,8 +6,8 @@ Google Sheets is the only data store. No database, no email provider, no cron.
 POST /api/questionnaire
   1. validate (consent mandatory)
   2. Sheet: duplicate check, then per-email limit    -> over the limit: 429, nothing else runs
-  3. append the header-mapped row to the Sheet       -> failure: 502, no report, no grant
-  4. generate the report (rules + AI narrative)      -> failure: 502 (answers stay saved), no grant
+  3. append the header-mapped row to the Sheet       -> failure: 502/503, no report, no grant
+  4. generate the report (rules + AI narrative)      -> failure: 503 saved_unconfirmed (answers stay saved), no grant
      (a duplicate never calls the AI, see "Duplicates")
   5. issue a 5-minute download grant
   <- { report, download: { token, expiresInMs } }    (report is NOT stored)

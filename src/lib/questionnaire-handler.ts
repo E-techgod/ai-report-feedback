@@ -5,6 +5,7 @@ import {
   MAX_SUBMISSIONS_PER_EMAIL,
   SUBMISSION_WINDOW_HOURS,
   markReportGenerated,
+  SavedUnconfirmedError,
   saveSubmissionWithRow,
   type SheetsGateway,
 } from './sheets';
@@ -34,6 +35,25 @@ export function waitText(seconds: number): string {
 export const limitMessage = (seconds: number) =>
   `Has alcanzado el límite de ${MAX_SUBMISSIONS_PER_EMAIL} diagnósticos en ${SUBMISSION_WINDOW_HOURS} horas con este correo. ` +
   `Por favor inténtalo de nuevo en ${waitText(seconds)}.`;
+
+export const SAVED_UNCONFIRMED_MESSAGE =
+  'Recibimos tus respuestas, pero no pudimos completar tu reporte. ' +
+  'Por favor, vuelve a intentarlo en aproximadamente 10 minutos.';
+
+/** 503: the answers are in the Sheet but no report was completed. Retry-After = rest of the window. */
+function savedUnconfirmed(savedAtMs: number, nowMs: number) {
+  return json(
+    { ok: false, saved: true, code: 'saved_unconfirmed', error: SAVED_UNCONFIRMED_MESSAGE },
+    503,
+    { 'retry-after': String(duplicateWindowRemaining(savedAtMs, nowMs)) },
+  );
+}
+
+/** Seconds left of the duplicate window that started when the row was written (1 to 600). */
+export function duplicateWindowRemaining(savedAtMs: number, nowMs: number): number {
+  const seconds = Math.ceil((savedAtMs + DUPLICATE_WINDOW_MINUTES * 60_000 - nowMs) / 1000);
+  return Math.min(DUPLICATE_WINDOW_MINUTES * 60, Math.max(1, seconds));
+}
 
 /**
  * 1) validates the submission (consent is mandatory), 2) applies the per-email limit and the
@@ -93,6 +113,16 @@ export async function handleQuestionnaire(
     // Log only a short message: Google client errors can embed request details.
     const message = error instanceof Error ? error.message.slice(0, 200) : 'unknown error';
     console.error('[questionnaire] Google Sheets write failed:', message);
+    if (error instanceof SavedUnconfirmedError) {
+      // The row exists but could not be confirmed: say so, and when the same answers can be sent again
+      // (a retry before then is a duplicate, and reports are not stored, so it could not be served).
+      logSecurityEvent('sheets_unavailable', {
+        subject,
+        reason: classifySheetsError(error.reason),
+        outcome: 'saved_unconfirmed',
+      });
+      return savedUnconfirmed(error.savedAtMs, clock().getTime());
+    }
     const failure = classifySheetsError(error);
     logSecurityEvent('sheets_unavailable', { subject, reason: failure, outcome: 'submission' });
     if (failure === 'quota')
@@ -105,8 +135,13 @@ export async function handleQuestionnaire(
         503,
         { 'retry-after': '60' },
       );
+    // The write itself failed or is uncertain: claim nothing about whether it was saved.
     return json(
-      { ok: false, error: 'No se pudo guardar tu diagnóstico. Intenta nuevamente.' },
+      {
+        ok: false,
+        error:
+          'No pudimos confirmar el envío de tu diagnóstico. Inténtalo de nuevo en unos minutos.',
+      },
       502,
     );
   }
@@ -147,23 +182,19 @@ export async function handleQuestionnaire(
         subject,
         outcome: windowOver ? 'refused_window_over' : 'refused_report_unavailable',
       });
-      const waitSeconds = Math.ceil(
-        (saved.submittedAtMs + DUPLICATE_WINDOW_MINUTES * 60_000 - nowMs) / 1000,
-      );
-      const next =
-        waitSeconds > 0
-          ? `Podrás generar un informe nuevo en ${waitText(waitSeconds)}.`
-          : 'Actualiza la página y vuelve a enviar el cuestionario para generar un informe nuevo.';
+      const waitSeconds = duplicateWindowRemaining(saved.submittedAtMs, nowMs);
+      const stillInWindow = saved.submittedAtMs + DUPLICATE_WINDOW_MINUTES * 60_000 > nowMs;
+      // Never assume the person already received a report (the first attempt may have failed before
+      // one was made): say only what is true, and when a new report can be generated.
+      const next = stillInWindow
+        ? `Podrás generar un informe nuevo en ${waitText(waitSeconds)}.`
+        : 'Vuelve a enviar el cuestionario para generar un informe nuevo.';
       return json(
         {
           ok: false,
           duplicate: true,
           code: windowOver ? 'duplicate_window_over' : 'duplicate_report_unavailable',
-          error: windowOver
-            ? `Ya recibimos este diagnóstico y su ventana de descarga de 5 minutos terminó. ${next}`
-            : 'Ya recibimos este diagnóstico, pero no podemos volver a mostrarte el mismo informe desde aquí. ' +
-              'Si todavía tienes abierta la página con tu informe, puedes seguir descargándolo hasta que ' +
-              `termine su ventana de 5 minutos. ${next}`,
+          error: `Ya recibimos este diagnóstico, pero no podemos mostrar su informe desde aquí. ${next}`,
         },
         409,
       );
@@ -211,14 +242,6 @@ export async function handleQuestionnaire(
       '[questionnaire] report generation failed:',
       error instanceof Error ? error.message.slice(0, 200) : 'unknown',
     );
-    return json(
-      {
-        ok: false,
-        saved: true,
-        error:
-          'Tus respuestas se guardaron, pero no pudimos generar el informe. Espera unos minutos y vuelve a enviar el cuestionario.',
-      },
-      502,
-    );
+    return savedUnconfirmed(saved.submittedAtMs, clock().getTime());
   }
 }

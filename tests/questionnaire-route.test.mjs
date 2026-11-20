@@ -223,7 +223,9 @@ test('when the report cannot be generated the answers stay saved but no grant is
     console.error = originalError;
   }
   const body = await response.json();
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 503);
+  assert.equal(body.code, 'saved_unconfirmed');
+  assert.match(response.headers.get('retry-after') ?? '', /^\d+$/);
   assert.equal(body.saved, true);
   assert.equal('download' in body, false);
   assert.equal('report' in body, false);
