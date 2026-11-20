@@ -13,22 +13,39 @@ It **never touches the production spreadsheet**:
 - All Sheets calls go through a throttle (default 30/min, `LIVE_MAX_CALLS_PER_MIN`) because the Google
   quota is **per project and per user, shared with Production** if you use the same service account.
 
+## Setup (once)
+
+1. In Google Sheets create a **new, empty** spreadsheet and title it exactly `[TEST] bp-questionnaire abuse protection`.
+   It must not be a copy of the real response sheet and must contain no real data. The suite adds the
+   response tab (`Respuestas de formulario 1`), the headers and the `Control de descargas` tab itself.
+2. Share it with the **service account** (the value of `GOOGLE_CLIENT_EMAIL`) as **Editor**.
+3. Copy the id from the URL: `https://docs.google.com/spreadsheets/d/<ID>/edit`.
+
 ## Run it
 
 ```bash
-LIVE_TEST_ENV_FILE=/path/to/.env npm run test:live
-# or, with variables already exported:
-GOOGLE_CLIENT_EMAIL=... GOOGLE_PRIVATE_KEY=... npm run test:live
+LIVE_TEST_SHEET_ID=<ID> LIVE_TEST_ENV_FILE=/path/to/.env npm run test:live
 ```
 
-It takes several minutes (the throttle). Scenarios: the 6th submission, the rolling 24-hour window, 8
-concurrent submissions, duplicates (cached, uncached, window over), the 6th download, and 10 parallel
-downloads over 3 simulated instances. It prints the real number of Sheets requests and the time per request. Expected after the quota optimization (`docs/sheets-quota.md`): 4 reads + 2 writes per accepted submission, 2 reads for a refused 6th, 1 read + 1 write per delivered download. If the live numbers are higher, the consolidation is not behaving as the fakes suggest.
+`LIVE_TEST_ENV_FILE` is only read for `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY` (nothing is
+printed; a different `GOOGLE_SHEET_ID` in that file is ignored). Without `LIVE_TEST_SHEET_ID` the run stops
+immediately and makes no Google call. It also refuses an id that matches any `GOOGLE_SHEET_ID` line in
+the env file, and any spreadsheet whose title does not start with `[TEST]`.
 
-**The service account of this project cannot create spreadsheets** (Google answered "The caller does not
-have permission" when this was tried), so the run needs a spreadsheet you create: make an empty one
-titled `[TEST] ...`, share it with the service account email as **Editor**, and pass
-`LIVE_TEST_SHEET_ID=<its id>`. The suite adds the response tab and headers itself.
+It takes several minutes (the throttle). Scenarios: (1) the 6th submission, (2) the rolling 24-hour
+window, (3) 8 concurrent submissions, (4) duplicates (cached, uncached, window over), (5) the 6th
+download and the ledger tab, (6) 10 parallel downloads over 3 simulated instances, (7) an ambiguous write
+(a row Google really saved, reported to the app as a quota error; the retry must be a clean `409` with
+no second row). It prints the real number of Sheets requests and the time per request. Expected after
+the quota optimization (`docs/sheets-quota.md`): 4 reads + 2 writes per accepted submission, 2 reads for a
+refused 6th, 1 read + 1 write per delivered download. If the live numbers are higher, the consolidation
+is not behaving as the fakes suggest.
+
+**What the live run does NOT do, on purpose:** it does not exhaust Google's quota. The quota belongs to
+the service account's Cloud project and is shared with Production, so a deliberate `429` test would
+throttle the real app. Quota errors are only simulated (and the ambiguous write above injects its fault
+into a real append). To test a real `429` safely, use a separate service account in a separate Cloud
+project and say so before running it.
 
 ## Manual steps (browser and real deployment)
 

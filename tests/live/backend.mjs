@@ -98,20 +98,28 @@ export async function createLiveBackend() {
   const sheetsApi = google.sheets({ version: 'v4', auth });
   const TAB = 'Respuestas de formulario 1';
 
-  let spreadsheetId = process.env.LIVE_TEST_SHEET_ID;
-  const creating = !spreadsheetId;
-  if (creating) {
-    const { data } = await sheetsApi.spreadsheets.create({
-      requestBody: {
-        properties: {
-          title: `[TEST] bp-questionnaire abuse protection ${new Date().toISOString()}`,
-        },
-        sheets: [{ properties: { title: TAB } }],
-      },
-    });
-    spreadsheetId = data.spreadsheetId;
-    log('created isolated test spreadsheet', spreadsheetId);
-  }
+  // The test spreadsheet must be created by a person and shared with the service account: this
+  // project's service account is not allowed to create spreadsheets, and creating one is never
+  // attempted. See docs/live-testing.md for the exact setup.
+  const spreadsheetId = process.env.LIVE_TEST_SHEET_ID;
+  if (!spreadsheetId)
+    throw new Error(
+      'LIVE_TEST_SHEET_ID is not set. Create an empty spreadsheet titled "[TEST] ...", share it with ' +
+        `${process.env.GOOGLE_CLIENT_EMAIL} as Editor and pass its id (docs/live-testing.md).`,
+    );
+  // Never the production spreadsheet, even if someone titled it "[TEST]": compare with the id in the
+  // env file (read only for this comparison, never printed).
+  // Compare with EVERY GOOGLE_SHEET_ID line (quoted or not) of the env file.
+  const productionIds = file
+    ? readFileSync(file, 'utf8')
+        .split('\n')
+        .map((line) => /^\s*(?:export\s+)?GOOGLE_SHEET_ID\s*=\s*["']?([^"'\s]+)/.exec(line)?.[1])
+        .filter(Boolean)
+    : [];
+  if (productionIds.includes(spreadsheetId))
+    throw new Error(
+      'REFUSING to run: LIVE_TEST_SHEET_ID is the same id as GOOGLE_SHEET_ID in the env file',
+    );
 
   // 2) HARD GUARD: only ever run against a spreadsheet explicitly titled "[TEST] ...".
   const meta = await sheetsApi.spreadsheets.get({

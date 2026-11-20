@@ -296,4 +296,62 @@ export function defineScenarios(test, getBackend) {
       t.diagnostic(`10 parallel downloads over 3 instances: ${m.reads}r/${m.writes}w in ${m.ms}ms`);
     },
   );
+
+  test(
+    'SCENARIO 7: ambiguous write: Google saved the row, the client was told it failed (injected fault), the retry is a clean 409',
+    opts,
+    async (t) => {
+      const { h, ctx } = context();
+      const real = ctx.gateway;
+      let injected = false;
+      // Real storage, injected fault: the append REALLY happens, then the caller sees a quota error.
+      ctx.gateway = new Proxy(real, {
+        get(target, prop) {
+          if (prop !== 'appendRow') return Reflect.get(target, prop, target)?.bind?.(target);
+          return async (row) => {
+            const result = await target.appendRow(row);
+            if (!injected) {
+              injected = true;
+              const error = new Error('Quota exceeded (injected after a real append)');
+              error.code = 429;
+              throw error;
+            }
+            return result;
+          };
+        },
+      });
+      const email = uniqueEmail();
+      const input = submission({ email });
+      const first = await send(ctx, input);
+      const firstBody = await first.json();
+      assert.equal(first.status, 503);
+      assert.equal(first.headers.get('retry-after'), '60');
+      assert.equal(firstBody.code, 'service_busy');
+      assert.equal(
+        (await rowsFor(email)).length,
+        1,
+        'the row exists although the client saw an error',
+      );
+      assert.equal(h.narrativeCalls.length, 0, 'no report was generated');
+
+      // Immediate retry with the same id, then a fresh attempt with the same answers.
+      h.clock.t += 30_000;
+      const retry = await send(ctx, input);
+      const retryBody = await retry.json();
+      assert.equal(retry.status, 409);
+      assert.equal(retryBody.code, 'duplicate_report_unavailable');
+      const refreshed = await send(ctx, { ...input, id: crypto.randomUUID() });
+      assert.equal(refreshed.status, 409);
+      assert.equal((await rowsFor(email)).length, 1, 'neither retry added a row');
+      assert.equal(h.narrativeCalls.length, 0, 'and neither called the AI');
+
+      // After the 10-minute duplicate window the person can resubmit: a new row, a new report.
+      h.clock.t += 10 * MIN;
+      const again = await send(ctx, { ...input, id: crypto.randomUUID() });
+      assert.equal(again.status, 200);
+      assert.equal((await rowsFor(email)).length, 2);
+      t.diagnostic(`first: ${first.status} "${firstBody.error}"`);
+      t.diagnostic(`retry: ${retry.status} "${retryBody.error}"`);
+    },
+  );
 }
