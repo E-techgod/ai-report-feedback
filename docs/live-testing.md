@@ -80,3 +80,33 @@ with the service account, with `GROQ_API_KEY` set only if you want to see real A
   Google clients in one process).
 - The Vercel Firewall rule (not applied, see `docs/handle-abuse.md` section 4).
 - Behavior at Google's real quota ceiling.
+
+## Results of the first live run (2026-11-19)
+
+Real Google Sheets, isolated `[TEST]` spreadsheet, the project's service account, AI stubbed. Reported
+separately from the in-memory tests (265 passing), which do not talk to Google.
+
+| Scenario                                                            | Live result                                                                                                           |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 1. 6th submission from one email                                    | pass: five accepted, the 6th is `429` with the friendly message, no AI call, no 6th row                               |
+| 2. Rolling 24-hour window                                           | pass                                                                                                                  |
+| 3. 8 concurrent submissions, one email                              | pass: exactly 5 `200` and 3 `429`; 8 rows written, 3 labelled `Rechazado por límite`; retries still `429`             |
+| 4. Duplicates                                                       | pass: identical report and grant when cached, `409` when not, `409` after the window, new submission after 10 minutes |
+| 5. 6th download                                                     | pass: 5 PDFs, the 6th is `429`; ledger tab created automatically; only timestamp and opaque `dl_` key stored          |
+| 6. 10 parallel downloads over 3 instances (separate Google clients) | pass: exactly 5 delivered                                                                                             |
+| 7. Ambiguous write (real append, injected quota error)              | pass: one row, no AI call; first answer `503`, retries `409`, resubmission after 10 minutes is a new row              |
+
+Requests per flow (counted at the gateway, one gateway call = one Google API request; the batching was
+also checked at HTTP level against a local server): accepted submission 4 reads + 2 writes (5 + 2 on a
+cold instance), refused 6th 2 reads, delivered download 1 read + 1 write, 6th download 0. 8 concurrent
+submissions: 19 reads + 11 writes (8 appends + 3 labels). 10 parallel downloads: 7 reads + 7 writes.
+
+Latency, unthrottled sample (about 35 and 12 calls, far below the quota): accepted submission about
+1.0-1.3 s of Sheets time, refused 6th submission 0.4 s, delivered download 0.3-0.5 s (the first one
+includes the one-time ledger tab check). The latencies in the full run are about 12 s per submission
+because the suite throttles itself to 30 calls per minute; do not read them as real latency.
+
+Not exercised live: a real Google `429` (it would throttle the quota shared with Production), several
+real Vercel instances, the browser UI, and the real AI. Observed: the `409` text after an ambiguous
+write still says "if you still have your report page open you can keep downloading", which is wrong in
+that case (see `docs/sheets-quota.md` section 7).
