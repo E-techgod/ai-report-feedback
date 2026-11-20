@@ -52,5 +52,7 @@ stays empty: there is nothing to project. The legacy Apps Script files in `scrip
 ## Abuse protection
 
 Per-email submission limit (5 per rolling 24 h), 5 successful downloads per submission, duplicate
-handling (no AI call, no new window), the Vercel Firewall rule, monitoring logs, limitations and an
-operations runbook are documented in [`docs/handle-abuse.md`](./handle-abuse.md).
+handling (the same report or a clear `409`, never a new AI call or window), the proposed Vercel Firewall
+rule (**100 POST requests per IP per 60 seconds** on `/api/questionnaire`, fixed window; not yet applied
+to Production), monitoring logs, limitations and an operations runbook are documented in
+[`docs/handle-abuse.md`](./handle-abuse.md).

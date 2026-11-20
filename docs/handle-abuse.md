@@ -17,13 +17,13 @@ perfectly, this document says so ([Limitations](#limitations-read-this)).
 
 ## At a glance
 
-| What                      | Limit                                          | Enforced by                        | Over the limit                                                                  |
-| ------------------------- | ---------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------- |
-| Submissions per email     | **5 per rolling 24 hours**                     | the app, against the Sheet         | `429` + `Retry-After`, no AI call                                               |
-| Downloads per submission  | **5 successful**, only within the 5-min window | the app, against the ledger tab    | `429`                                                                           |
-| Download window           | **5 minutes** from when the report is ready    | signed token (HMAC)                | `410` expired                                                                   |
-| Repeating the same survey | same email + answers within **10 minutes**     | the app, against the Sheet         | the **same report** again (same instance) or a clear `409`; never a new AI call |
-| Requests per IP           | **10 per minute** on `/api/questionnaire`      | **Vercel Firewall (to be set up)** | `429` from Vercel                                                               |
+| What                      | Limit                                                    | Enforced by                        | Over the limit                                                                  |
+| ------------------------- | -------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------- |
+| Submissions per email     | **5 per rolling 24 hours**                               | the app, against the Sheet         | `429` + `Retry-After`, no AI call                                               |
+| Downloads per submission  | **5 successful**, only within the 5-min window           | the app, against the ledger tab    | `429`                                                                           |
+| Download window           | **5 minutes** from when the report is ready              | signed token (HMAC)                | `410` expired                                                                   |
+| Repeating the same survey | same email + answers within **10 minutes**               | the app, against the Sheet         | the **same report** again (same instance) or a clear `409`; never a new AI call |
+| Requests per IP           | **100 POST per 60 s** on `/api/questionnaire` (proposed) | **Vercel Firewall (to be set up)** | `429` from Vercel                                                               |
 
 ## 1. Submissions: 5 per email per rolling 24 hours
 
@@ -154,6 +154,14 @@ A per-IP counter needs shared state that survives across serverless instances (a
 which this project does not use), and an in-memory counter is per instance and would not hold. So the
 per-IP limit is a **Vercel Firewall rule**, which runs before the app. It also keeps floods away from
 the Sheets quota, which is what the in-app limits cannot do on their own.
+
+**Proposed configuration (not applied to Production):** `POST /api/questionnaire`, **100 requests per IP
+per 60 seconds**, fixed window, keyed by IP, default `429` when exceeded. It is deliberately generous: it
+does not slow a real person or an office or school sharing one IP, and only cuts off scripted floods. The
+real per-person limits stay in the app (5 submissions per email per 24 hours, 5 downloads per report).
+Because a request that reaches the app can cost up to ~12 Sheets calls, a single IP at the ceiling could
+still use a large share of Google's per-minute quota, so this rule is a flood brake, not a quota
+guarantee. It is activated only after the integration tests and PR review, with explicit approval.
 
 ## 5. Monitoring: structured, privacy-safe logs
 
@@ -303,7 +311,7 @@ These are not done by the code and need a person:
    | If                | Request Path **equals** `/api/questionnaire` **and** Method **equals** `POST` |
    | Then              | **Rate Limit**                                                                |
    | Strategy          | Fixed Window                                                                  |
-   | Window / Requests | 60 s / 10 requests                                                            |
+   | Window / Requests | 60 s / 100 requests (fixed window)                                            |
    | Key               | IP address                                                                    |
    | Action when over  | default `429 Too Many Requests`                                               |
 
@@ -316,14 +324,14 @@ These are not done by the code and need a person:
      --condition '{"type":"path","op":"eq","value":"/api/questionnaire"}' \
      --condition '{"type":"method","op":"eq","value":"POST"}' \
      --action rate_limit --rate-limit-algo fixed_window \
-     --rate-limit-requests 10 --rate-limit-window 60 --rate-limit-keys ip --yes
+     --rate-limit-requests 100 --rate-limit-window 60 --rate-limit-keys ip --yes
    vercel firewall diff      # review the draft
    vercel firewall publish   # makes it live
    ```
 
-   Check that it exists with `vercel firewall rules list`. To verify it works, send 11
-   `POST /api/questionnaire` requests with body `{}` from one IP (they are rejected with `400` before
-   touching Sheets or the AI, so the test is free): the 11th must return `429`. One rule fits the
+   Check that it exists with `vercel firewall rules list`. To verify it works, send 101
+   `POST /api/questionnaire` requests with body `{}` from one IP within 60 seconds (they are rejected
+   with `400` before touching Sheets or the AI, so the test is free): the 101st must return `429`. One rule fits the
    Hobby plan's allowance (1 rate-limit rule). `/api/report/pdf` is already bounded by the grant and the
    ledger, but if your plan allows a second rule, add the same one for it.
 
