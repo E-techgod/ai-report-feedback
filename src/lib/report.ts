@@ -212,12 +212,12 @@ export function buildReportModel(answers: Answers): ReportModel {
 }
 
 /* ------------------------------------------------------------------ */
-/* The 4 AI slots: executive summary (≤90 words) + 3 priority contexts (≤25 words each)        */
+/* The 4 AI slots: executive summary (≤50 words) + 3 priority contexts (≤25 words each)        */
 /* ------------------------------------------------------------------ */
 
 export type Narrative = { executiveSummary: string; priorityContexts: string[] };
 
-export const MAX_SUMMARY_WORDS = 90;
+export const MAX_SUMMARY_WORDS = 50;
 export const MAX_CONTEXT_WORDS = 25;
 
 export function wordCount(text: string): number {
@@ -236,15 +236,15 @@ export function fallbackNarrative(model: ReportModel): Narrative {
   const [a, b] = model.priorities.map((p) => THEMES.find((t) => t.id === p.themeId)!.title);
   const focus = b ? `${a} y ${b.toLowerCase()} destacan` : `${a} destaca`;
   return {
-    executiveSummary: `El resultado preliminar muestra áreas de protección que conviene atender de forma ordenada. ${focus} entre los puntos a revisar. Estos indicadores no equivalen a una valoración definitiva: sirven como punto de partida para contrastar tu situación con documentación vigente y definir acciones concretas con un especialista.`,
+    executiveSummary: `El resultado preliminar muestra áreas por atender de forma ordenada. ${focus} entre los puntos a revisar. Estos indicadores no equivalen a una valoración definitiva: sirven como punto de partida para contrastar tu situación con documentación vigente y definir acciones concretas con un especialista.`,
     priorityContexts: model.priorities.map((p) => p.context),
   };
 }
 
-/** Structured contract for the AI output: exact priority count and word limits. */
+/** Structured contract: exact priority count, field caps, and the report's combined AI budget. */
 export function narrativeSchema(
   priorityCount: number,
-  limits: { summary: number; context: number } = {
+  limits: { summary: number; context: number; total?: number } = {
     summary: MAX_SUMMARY_WORDS,
     context: MAX_CONTEXT_WORDS,
   },
@@ -259,14 +259,24 @@ export function narrativeSchema(
       executiveSummary: text(limits.summary),
       priorityContexts: z.array(text(limits.context)).length(priorityCount),
     })
-    .strict();
+    .strict()
+    .superRefine((narrative, ctx) => {
+      if (
+        limits.total !== undefined &&
+        wordCount(narrative.executiveSummary) +
+          narrative.priorityContexts.reduce((sum, context) => sum + wordCount(context), 0) >
+          limits.total
+      ) {
+        ctx.addIssue({ code: 'custom', message: 'AI word budget exceeded' });
+      }
+    });
 }
 
 /** Accepts the AI output only if it matches the contract exactly; otherwise null. */
 export function validateNarrative(
   candidate: unknown,
   priorityCount: number,
-  limits?: { summary: number; context: number },
+  limits?: { summary: number; context: number; total?: number },
 ): Narrative | null {
   const parsed = narrativeSchema(priorityCount, limits).safeParse(candidate);
   return parsed.success ? parsed.data : null;

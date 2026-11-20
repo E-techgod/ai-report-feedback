@@ -9,7 +9,7 @@ import {
   exceedsAiShare,
 } from '../src/lib/ai-share.ts';
 import { buildFinalReport } from '../src/lib/final-report.ts';
-import { generateNarrative } from '../src/lib/narrative.ts';
+import { generateNarrative, promptWordTargets } from '../src/lib/narrative.ts';
 import { generateReport } from '../src/lib/generate-report.ts';
 import {
   MAX_CONTEXT_WORDS,
@@ -28,6 +28,14 @@ const narrativeOf = (model, summary, context) => ({
   executiveSummary: words(summary),
   priorityContexts: model.priorities.map(() => words(context)),
 });
+const fittingNarrative = (model, limits, summary = Math.min(40, limits.summary)) =>
+  narrativeOf(
+    model,
+    summary,
+    model.priorities.length === 0
+      ? 0
+      : Math.min(limits.context, Math.floor((limits.total - summary) / model.priorities.length)),
+  );
 const reportWith = ({ answers, narrative, source = 'ai', firstName = 'Ana', bookingUrl = null }) =>
   buildFinalReport({
     reportId: randomUUID(),
@@ -39,14 +47,14 @@ const reportWith = ({ answers, narrative, source = 'ai', firstName = 'Ana', book
     now: new Date('2026-11-18T15:00:00Z'),
   });
 
-test('text written at the derived limits stays within 15% for every report shape and name', () => {
+test('text within the combined budget stays within 15% for every report shape and name', () => {
   for (const noCount of SCENARIOS) {
     const answers = answersWith(noCount);
     const model = buildReportModel(answers);
     const limits = aiWordLimits(model);
     assert.ok(limits.summary <= MAX_SUMMARY_WORDS && limits.context <= MAX_CONTEXT_WORDS);
     assert.ok(limits.summary >= 20, 'the limit leaves room for a useful summary');
-    const narrative = narrativeOf(model, limits.summary, limits.context);
+    const narrative = fittingNarrative(model, limits);
     for (const firstName of ['', 'Ana', 'María de los Ángeles Fernández']) {
       for (const bookingUrl of [null, 'https://example.com/cita']) {
         const report = reportWith({ answers, narrative, firstName, bookingUrl });
@@ -60,7 +68,7 @@ test('text written at the derived limits stays within 15% for every report shape
   }
 });
 
-test('the old static maximums (90 + 3 x 25 words) would exceed 15%, so they are rejected', () => {
+test('50 summary words plus 25 in every context would exceed 15%, so they are rejected', () => {
   const answers = answersWith(6);
   const model = buildReportModel(answers);
   const report = reportWith({
@@ -95,13 +103,13 @@ test('an oversized AI narrative is replaced by template text', async () => {
   assert.deepEqual(report.narrative, fallbackNarrative(model));
 });
 
-test('a narrative at the derived limits is kept as AI text', async () => {
+test('a narrative within the combined budget is kept as AI text', async () => {
   const answers = answersWith(6);
   const h = reportDeps({
     narrative: async (model) => {
       const limits = aiWordLimits(model);
       return {
-        narrative: narrativeOf(model, limits.summary, limits.context),
+        narrative: fittingNarrative(model, limits),
         source: 'ai',
         failureReason: null,
       };
@@ -123,18 +131,22 @@ test('the provider is told the derived limit and an answer inside it is accepted
     apiKey: 'k',
     fetchImpl: async (_u, init) => {
       system = JSON.parse(init.body).messages[0].content;
-      return reply(narrativeOf(model, limits.summary, limits.context));
+      return reply(fittingNarrative(model, limits));
     },
   });
   assert.equal(ok.source, 'ai');
-  assert.match(system, new RegExp(`máximo ${Math.floor(limits.summary * 0.85)} palabras`));
-  assert.match(system, new RegExp(`máximo ${Math.floor(limits.context * 0.85)} palabras`));
+  assert.match(system, new RegExp(`máximo ${limits.summary} palabras`));
+  assert.match(system, new RegExp(`máximo ${limits.context} palabras`));
+  assert.match(system, new RegExp(`no deben superar ${limits.total} palabras`));
+  const targets = promptWordTargets(model.priorities.length, limits);
+  assert.match(system, new RegExp(`procura ${targets.summary}`));
+  assert.match(system, new RegExp(`procura ${targets.context}`));
 
-  // Within the old 90-word limit but over this report's 15% limit: rejected at the schema step.
+  // Every field is within its own cap, but their sum exceeds this report's 15% budget.
   const long = await generateNarrative(model, {
     apiKey: 'k',
     maxAttempts: 1,
-    fetchImpl: async () => reply(narrativeOf(model, limits.summary + 10, limits.context)),
+    fetchImpl: async () => reply(narrativeOf(model, limits.summary, limits.context)),
   });
   assert.equal(long.source, 'template');
   assert.equal(long.failureReason, 'invalid-output');

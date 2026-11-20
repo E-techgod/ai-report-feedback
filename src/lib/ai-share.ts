@@ -35,7 +35,7 @@ export function exceedsAiShare(report: FinalReport): boolean {
   return aiShare(report) > MAX_AI_SHARE;
 }
 
-export type AiWordLimits = { summary: number; context: number };
+export type AiWordLimits = { summary: number; context: number; total?: number };
 
 export const DEFAULT_LIMITS: AiWordLimits = {
   summary: MAX_SUMMARY_WORDS,
@@ -45,10 +45,10 @@ export const DEFAULT_LIMITS: AiWordLimits = {
 const PLACEHOLDER_ID = '00000000-0000-4000-8000-000000000000';
 
 /**
- * Per-slot word limits that keep the AI at or under 15% for THIS report. The deterministic words
+ * Combined word budget that keeps the AI at or under 15% for THIS report. The deterministic words
  * (everything except the AI slots) are counted from a draft report with empty AI slots, no first
  * name and a booking link: the smallest the fixed text can be, so the limit is conservative
- * (a longer name or a missing link only adds fixed words). Never above the static maximums.
+ * (a longer name or a missing link only adds fixed words). Zod enforces both field caps and total.
  */
 export function aiWordLimits(model: ReportModel): AiWordLimits {
   const empty: Narrative = {
@@ -69,14 +69,15 @@ export function aiWordLimits(model: ReportModel): AiWordLimits {
   });
   const fixedWords = visibleWordCount(draft);
   const budget = Math.floor((MAX_AI_SHARE / (1 - MAX_AI_SHARE)) * fixedWords);
-  const count = model.priorities.length;
-  if (count === 0) return { summary: Math.min(MAX_SUMMARY_WORDS, budget), context: 0 };
-  const summary = Math.min(MAX_SUMMARY_WORDS, Math.floor(budget * 0.45));
-  const context = Math.min(MAX_CONTEXT_WORDS, Math.floor((budget - summary) / count));
-  return { summary, context };
+  return {
+    summary: Math.min(MAX_SUMMARY_WORDS, budget),
+    context: model.priorities.length === 0 ? 0 : Math.min(MAX_CONTEXT_WORDS, budget),
+    total: budget,
+  };
 }
 
 /** What the prompt asks for: a little under the enforced limit so a valid answer is not rejected. */
 export function promptWordTarget(limit: number): number {
+  if (limit === 0) return 0;
   return Math.max(1, Math.floor(limit * 0.85));
 }
